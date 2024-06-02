@@ -49,3 +49,13 @@ fn http_verb() {
 
     assert_eq!(ast.to_string(), input);
 }
+
+#[test]
+fn response_body_jq() {
+    let input = r#"(https://example.com)<(.x == 3)>"#;
+    let (ast, _errors) = parse(input);
+
+    let ast = ast.unwrap();
+
+    assert_eq!(ast.to_string(), input);
+}

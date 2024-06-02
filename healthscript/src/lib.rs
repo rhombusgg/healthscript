@@ -4,6 +4,7 @@ use ariadne::{Color, Label, Report, ReportKind, Source};
 use base64::Engine;
 use chumsky::{prelude::*, text::whitespace, util::MaybeRef};
 
+use regex::Regex;
 use serde_json::Value;
 use strsim::normalized_levenshtein;
 use yansi::Paint;
@@ -11,7 +12,7 @@ use yansi::Paint;
 // pub type Span = SimpleSpan<usize>;
 // pub type Spanned<T> = (T, Span);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Expr<'a> {
     Http(Http<'a>),
     Tcp(Tcp<'a>),
@@ -32,44 +33,89 @@ impl Display for Expr<'_> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Http<'a> {
     request_headers: Vec<(&'a str, &'a str)>,
     verb: Option<HttpVerb>,
-    request_body: Option<HttpBody<'a>>,
+    request_body: Option<HttpRequestBody<'a>>,
     url: &'a str,
     status_code: Option<u16>,
-    response_body: Option<HttpBody<'a>>,
     response_headers: Vec<(&'a str, &'a str)>,
-    // jq: Option<&'a str>,
-    // regex: Option<&'a str>,
+    response_body: Option<HttpResponseBody<'a>>,
 }
 
 impl Display for Http<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (name, value) in self.request_headers.iter() {
+            write!(f, "[{}: {}]", name, value)?;
+        }
+
         if let Some(verb) = &self.verb {
-            write!(f, "[{}]", format!("{:?}", verb).to_uppercase())?;
+            write!(f, "[{}]", verb)?;
         }
 
         if let Some(body) = &self.request_body {
-            match body {
-                HttpBody::Json(value) => write!(f, "<{}>", value)?,
-                HttpBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
-                HttpBody::Base64(base64) => write!(f, "<{}>", base64)?,
-            }
+            write!(f, "{}", body)?;
         }
 
         write!(f, "({})", self.url)?;
+
+        if let Some(status_code) = &self.status_code {
+            write!(f, "[{}]", status_code)?;
+        }
+
+        if let Some(body) = &self.response_body {
+            write!(f, "{}", body)?;
+        }
+
+        for (name, value) in self.response_headers.iter() {
+            write!(f, "[{}: {}]", name, value)?;
+        }
 
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HttpBody<'a> {
+pub enum HttpRequestBody<'a> {
     Json(Value),
     Text(&'a str),
     Base64(&'a str),
+}
+
+impl Display for HttpRequestBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpRequestBody::Json(value) => write!(f, "<{}>", value)?,
+            HttpRequestBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
+            HttpRequestBody::Base64(base64) => write!(f, "<{}>", base64)?,
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum HttpResponseBody<'a> {
+    Json(Value),
+    Text(&'a str),
+    Base64(&'a str),
+    Jq { body: &'a str, expr: jaq_syn::Main },
+    Regex(Regex),
+}
+
+impl Display for HttpResponseBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpResponseBody::Json(value) => write!(f, "<{}>", value)?,
+            HttpResponseBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
+            HttpResponseBody::Base64(base64) => write!(f, "<{}>", base64)?,
+            HttpResponseBody::Jq { body, expr: _ } => write!(f, "<({})>", body)?,
+            HttpResponseBody::Regex(r) => write!(f, "<{}>", r)?,
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +129,14 @@ pub enum HttpVerb {
     Options,
     Trace,
     Patch,
+}
+
+impl Display for HttpVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", format!("{:?}", self).to_uppercase())?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -267,7 +321,7 @@ fn validate_http_code(code: &str) -> Result<u16, Option<(u16, &'static str)>> {
         let d = normalized_levenshtein(&code.to_lowercase(), &c.1.to_lowercase());
         if d > distance {
             distance = d;
-            closest = c.clone();
+            closest = *c;
         }
     }
 
@@ -353,10 +407,8 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         })
         .delimited_by(just("("), just(")"));
 
-    let body = any()
+    let request_body = any()
         .and_is(just(">").then(url).not())
-        .and_is(just(">").then(headers).not())
-        .and_is(just(">").then(end()).not())
         .repeated()
         .to_slice()
         .validate(|body: &str, e, emitter| {
@@ -364,14 +416,14 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
 
             if body.starts_with('{') && body.ends_with('}') {
                 match serde_json::from_str(body) {
-                    Ok(value) => return Some(HttpBody::Json(value)),
+                    Ok(value) => return Some(HttpRequestBody::Json(value)),
                     Err(err) => {
                         let column = err.column();
                         let json_span =
                             SimpleSpan::new(span.start + column - 1, span.start + column - 1);
 
                         let report = Report::build(ReportKind::Error, (), json_span.start)
-                            .with_message("Invalid JSON body")
+                            .with_message("Invalid JSON request body")
                             .with_label(
                                 Label::new(json_span.into_range())
                                     .with_message(err.to_string())
@@ -379,7 +431,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                             )
                             .with_label(
                                 Label::new(span.into_range())
-                                    .with_message("Invalid JSON body")
+                                    .with_message("Invalid JSON request body")
                                     .with_color(Color::Red),
                             )
                             .finish();
@@ -391,17 +443,17 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
             }
 
             if body.starts_with('"') && body.ends_with('"') {
-                return Some(HttpBody::Text(&body[1..body.len() - 1]));
+                return Some(HttpRequestBody::Text(&body[1..body.len() - 1]));
             }
 
             match base64::prelude::BASE64_STANDARD.decode(body) {
-                Ok(_) => return Some(HttpBody::Base64(body)),
+                Ok(_) => return Some(HttpRequestBody::Base64(body)),
                 Err(_) => {
                     let report = Report::build(ReportKind::Error, (), span.start)
-                        .with_message("Invalid base64 body")
+                        .with_message("Invalid base64 request body")
                         .with_label(
                             Label::new(span.into_range())
-                                .with_message("Invalid base64 body")
+                                .with_message("Invalid base64 request body")
                                 .with_color(Color::Red),
                         )
                         .with_note("For raw string literals, wrap the string in double quotes")
@@ -415,7 +467,134 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                         ))
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    return None;
+                    None
+                }
+            }
+        })
+        .delimited_by(just("<"), just(">"));
+
+    let response_body = any()
+        .and_is(just(">").then(headers).not())
+        .and_is(just(">").then(end()).not())
+        .repeated()
+        .to_slice()
+        .validate(|body: &str, e, emitter| {
+            let span: SimpleSpan<usize> = e.span();
+
+            if body.starts_with('{') && body.ends_with('}') {
+                match serde_json::from_str(body) {
+                    Ok(value) => return Some(HttpResponseBody::Json(value)),
+                    Err(err) => {
+                        let column = err.column();
+                        let json_span =
+                            SimpleSpan::new(span.start + column - 1, span.start + column - 1);
+
+                        let report = Report::build(ReportKind::Error, (), json_span.start)
+                            .with_message("Invalid JSON response body")
+                            .with_label(
+                                Label::new(json_span.into_range())
+                                    .with_message(err.to_string())
+                                    .with_color(Color::Yellow),
+                            )
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message("Invalid JSON request body")
+                                    .with_color(Color::Red),
+                            )
+                            .finish();
+                        emitter.emit(MyError::Report(report));
+
+                        return None;
+                    }
+                }
+            }
+
+            if body.starts_with('"') && body.ends_with('"') {
+                return Some(HttpResponseBody::Text(&body[1..body.len() - 1]));
+            }
+
+            if body.starts_with('/') && body.ends_with('/') {
+                return match Regex::new(&body[1..body.len() - 1]) {
+                    Ok(re) => Some(HttpResponseBody::Regex(re)),
+                    Err(err) => {
+                        let report = Report::build(ReportKind::Error, (), span.start)
+                            .with_message("Invalid regex response body")
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message(err.to_string())
+                                    .with_color(Color::Red),
+                            )
+                            .finish();
+                        emitter.emit(MyError::Report(report));
+                        None
+                    }
+                };
+            }
+
+            if body.starts_with('(') && body.ends_with(')') {
+                let expression = &body[1..body.len() - 1];
+
+                let mut defs = jaq_interpret::ParseCtx::new(vec![]);
+                defs.insert_natives(jaq_core::core());
+                defs.insert_defs(jaq_std::std());
+
+                let (expr, errors) = jaq_parse::parse(expression, jaq_parse::main());
+
+                if !errors.is_empty() {
+                    let labels = errors
+                        .iter()
+                        .map(|e| {
+                            let jq_span = e.span();
+                            let jq_span = SimpleSpan::new(
+                                span.start + jq_span.start,
+                                span.start + jq_span.end,
+                            );
+
+                            Label::new(jq_span.into_range())
+                                .with_message(format!("{:#?}", e.reason()))
+                                .with_color(Color::Yellow)
+                        })
+                        .collect::<Vec<_>>();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid jq expression")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message("Invalid jq expression")
+                                .with_color(Color::Red),
+                        )
+                        .with_labels(labels)
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                }
+
+                return expr.map(|expr| HttpResponseBody::Jq {
+                    body: expression,
+                    expr,
+                });
+            }
+
+            match base64::prelude::BASE64_STANDARD.decode(body) {
+                Ok(_) => return Some(HttpResponseBody::Base64(body)),
+                Err(_) => {
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid base64 response body")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message("Invalid base64 response body")
+                                .with_color(Color::Red),
+                        )
+                        .with_note("For raw string literals, wrap the string in double quotes")
+                        .with_help(format!(
+                            "Did you mean {}{}{}{}{}?",
+                            "<".bold(),
+                            '"'.bold().green(),
+                            body.bold(),
+                            '"'.bold().green(),
+                            ">".bold()
+                        ))
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                    None
                 }
             }
         })
@@ -467,10 +646,10 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
 
     let http = headers
         .then(http_verb.repeated().at_most(1).collect::<Vec<_>>())
-        .then(body.repeated().at_most(1).collect::<Vec<_>>())
+        .then(request_body.repeated().at_most(1).collect::<Vec<_>>())
         .then(url)
         .then(status_code.repeated().at_most(1).collect::<Vec<_>>())
-        .then(body.repeated().at_most(1).collect::<Vec<_>>())
+        .then(response_body.repeated().at_most(1).collect::<Vec<_>>())
         .then(headers)
         .map(
             |(
@@ -479,11 +658,11 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
             )| {
                 Expr::Http(Http {
                     request_headers,
-                    verb: verb.get(0).cloned().flatten(),
-                    request_body: request_body.get(0).cloned().flatten(),
+                    verb: verb.first().cloned().flatten(),
+                    request_body: request_body.first().cloned().flatten(),
                     url,
-                    status_code: status_code.get(0).cloned().flatten(),
-                    response_body: response_body.get(0).cloned().flatten(),
+                    status_code: status_code.first().cloned().flatten(),
+                    response_body: response_body.first().cloned().flatten(),
                     response_headers,
                 })
             },

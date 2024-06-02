@@ -17,8 +17,8 @@ fn http_verb() {
                     request_body: None,
                     url: "https://example.com",
                     status_code: None,
-                    response_body: None,
                     response_headers: [],
+                    response_body: None,
                 },
             ),
         )
