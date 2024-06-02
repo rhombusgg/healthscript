@@ -10,11 +10,13 @@ fn single_url() {
         Some(
             Http(
                 Http {
-                    request_header: [],
+                    request_headers: [],
                     verb: None,
                     request_body: None,
                     url: "https://example.com",
                     status_code: None,
+                    response_body: None,
+                    response_headers: [],
                 },
             ),
         )
@@ -31,13 +33,15 @@ fn http_verb() {
         Some(
             Http(
                 Http {
-                    request_header: [],
+                    request_headers: [],
                     verb: Some(
                         Get,
                     ),
                     request_body: None,
                     url: "https://example.com",
                     status_code: None,
+                    response_body: None,
+                    response_headers: [],
                 },
             ),
         )

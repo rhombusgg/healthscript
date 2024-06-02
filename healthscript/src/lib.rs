@@ -34,13 +34,13 @@ impl Display for Expr<'_> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Http<'a> {
-    request_header: Vec<(&'a str, &'a str)>,
+    request_headers: Vec<(&'a str, &'a str)>,
     verb: Option<HttpVerb>,
     request_body: Option<HttpBody<'a>>,
     url: &'a str,
     status_code: Option<u16>,
-    // reponse_body: Option<&'a str>,
-    // response_header: Vec<(&'a str, &'a str)>,
+    response_body: Option<HttpBody<'a>>,
+    response_headers: Vec<(&'a str, &'a str)>,
     // jq: Option<&'a str>,
     // regex: Option<&'a str>,
 }
@@ -355,6 +355,8 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
 
     let body = any()
         .and_is(just(">").then(url).not())
+        .and_is(just(">").then(headers).not())
+        .and_is(just(">").then(end()).not())
         .repeated()
         .to_slice()
         .validate(|body: &str, e, emitter| {
@@ -468,15 +470,24 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         .then(body.repeated().at_most(1).collect::<Vec<_>>())
         .then(url)
         .then(status_code.repeated().at_most(1).collect::<Vec<_>>())
-        .map(|((((request_headers, verb), body), url), status_code)| {
-            Expr::Http(Http {
-                request_header: request_headers,
-                verb: verb.get(0).cloned().flatten(),
-                request_body: body.get(0).cloned().flatten(),
-                url,
-                status_code: status_code.get(0).cloned().flatten(),
-            })
-        });
+        .then(body.repeated().at_most(1).collect::<Vec<_>>())
+        .then(headers)
+        .map(
+            |(
+                (((((request_headers, verb), request_body), url), status_code), response_body),
+                response_headers,
+            )| {
+                Expr::Http(Http {
+                    request_headers,
+                    verb: verb.get(0).cloned().flatten(),
+                    request_body: request_body.get(0).cloned().flatten(),
+                    url,
+                    status_code: status_code.get(0).cloned().flatten(),
+                    response_body: response_body.get(0).cloned().flatten(),
+                    response_headers,
+                })
+            },
+        );
     http
 
     // uri.map(|x| Expr::Http(x))

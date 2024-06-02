@@ -12,7 +12,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let (_ast, errors) = healthscript::parse(&args.script);
+    let (ast, errors) = healthscript::parse(&args.script);
 
     if errors.is_empty() {
         println!("Parsed successfully");
@@ -20,5 +20,10 @@ fn main() {
         for error in errors {
             eprintln!("{}", error);
         }
+    }
+
+    println!("{:#?}", ast);
+    if let Some(ast) = ast {
+        println!("{}", ast);
     }
 }

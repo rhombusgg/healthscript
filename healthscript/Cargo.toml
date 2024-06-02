@@ -9,7 +9,7 @@ edition = "2021"
 ariadne = "0.4.1"
 base64 = "0.22.1"
 chumsky = { version = "1.0.0-alpha.7", features = ["label"] }
-jaq = "1.4.0"
+jaq-parse = "1.0.2"
 regex = "1.10.4"
 reqwest = { version = "0.12.4", default-features = false, features = [
     "json",
