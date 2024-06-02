@@ -403,6 +403,7 @@ name = "healthscript"
 version = "0.1.0"
 dependencies = [
  "ariadne",
+ "base64",
  "chumsky 1.0.0-alpha.7",
  "expect-test",
  "jaq",

@@ -1,7 +1,8 @@
 use std::ops::Range;
 
-use ariadne::{Color, Label, Report, ReportKind, Source};
-use chumsky::{error::Error, prelude::*, text::whitespace, util::MaybeRef};
+use ariadne::{Color, Label, Report, ReportKind};
+use base64::Engine;
+use chumsky::{prelude::*, text::whitespace, util::MaybeRef};
 
 use serde_json::Value;
 use strsim::normalized_levenshtein;
@@ -23,7 +24,7 @@ enum Expr<'a> {
 struct Http<'a> {
     RequestHeader: Vec<(&'a str, &'a str)>,
     Verb: Option<HttpVerb>,
-    RequestBody: Option<Body<'a>>,
+    RequestBody: Option<HttpBody<'a>>,
     Url: &'a str,
     StatusCode: Option<u16>,
     // ReponseBody: Option<&'a str>,
@@ -33,7 +34,7 @@ struct Http<'a> {
 }
 
 #[derive(Clone, Debug)]
-enum Body<'a> {
+enum HttpBody<'a> {
     Json(Value),
     Text(&'a str),
     Base64(&'a str),
@@ -83,8 +84,6 @@ fn closest_verb(verb: &str) -> Result<HttpVerb, (&'static str, HttpVerb)> {
         "TRACE" => Ok(HttpVerb::Trace),
         "PATCH" => Ok(HttpVerb::Patch),
         _ => {
-            // use normalized_levenshtein against every known verb and return the closest one
-
             let lower = verb.to_uppercase();
             let verbs = [
                 ("GET", HttpVerb::Get),
@@ -328,19 +327,20 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         .repeated()
         .to_slice()
         .validate(|body: &str, e, emitter| {
+            let span: SimpleSpan<usize> = e.span();
+
             if body.starts_with('{') && body.ends_with('}') {
                 match serde_json::from_str(body) {
-                    Ok(value) => return Some(Body::Json(value)),
+                    Ok(value) => return Some(HttpBody::Json(value)),
                     Err(err) => {
                         let column = err.column();
-                        let span: SimpleSpan<usize> = e.span();
-                        let new_span =
+                        let json_span =
                             SimpleSpan::new(span.start + column - 1, span.start + column - 1);
 
-                        let report = Report::build(ReportKind::Error, (), new_span.start)
+                        let report = Report::build(ReportKind::Error, (), json_span.start)
                             .with_message("Invalid JSON body")
                             .with_label(
-                                Label::new(new_span.into_range())
+                                Label::new(json_span.into_range())
                                     .with_message(err.to_string())
                                     .with_color(Color::Yellow),
                             )
@@ -357,7 +357,34 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                 }
             }
 
-            None
+            if body.starts_with('"') && body.ends_with('"') {
+                return Some(HttpBody::Text(&body[1..body.len() - 1]));
+            }
+
+            match base64::prelude::BASE64_STANDARD.decode(body) {
+                Ok(_) => return Some(HttpBody::Base64(body)),
+                Err(_) => {
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid base64 body")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message("Invalid base64 body")
+                                .with_color(Color::Red),
+                        )
+                        .with_note("For raw string literals, wrap the string in double quotes")
+                        .with_help(format!(
+                            "Did you mean {}{}{}{}{}?",
+                            "<".bold(),
+                            '"'.bold().green(),
+                            body.bold(),
+                            '"'.bold().green(),
+                            ">".bold()
+                        ))
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                    return None;
+                }
+            }
         })
         .delimited_by(just("<"), just(">"));
 
@@ -445,7 +472,7 @@ mod tests {
 
     #[test]
     fn http_verb_unknown() {
-        let input = r#"[A:   B}[Ckdsf: Dsdf][PSTCH]<{ "hi}>": { "1" ["a"] } }>(http://example.com/?hi=x%29a)[proxy auth requi]"#;
+        let input = r#"[A:   B}[Ckdsf: Dsdf][PSTCH]<+uwgVQA=>(http://example.com/?hi=x%29a)[proxy auth requi]"#;
         let (ast, errors) = parser().parse(input).into_output_errors();
 
         println!("{:#?}", errors.len());
