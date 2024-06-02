@@ -1,9 +1,8 @@
-use chumsky::{
-    extra::Err,
-    prelude::*,
-    span::Span,
-    text::{ascii::keyword, whitespace},
-};
+use std::ops::Range;
+
+use ariadne::{Color, Label, Report, ReportKind, Source};
+use chumsky::{error::Error, prelude::*, text::whitespace, util::MaybeRef};
+
 use serde_json::Value;
 use strsim::normalized_levenshtein;
 use yansi::Paint;
@@ -248,7 +247,27 @@ fn validate_http_code(code: &str) -> Result<u16, Option<(u16, &'static str)>> {
     Err(None)
 }
 
-fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>> {
+enum MyError<'a> {
+    Rich(Rich<'a, char>),
+    Report(Report<'a, Range<usize>>),
+}
+
+impl<'a> chumsky::error::Error<'a, &'a str> for MyError<'a> {
+    fn expected_found<E: IntoIterator<Item = Option<MaybeRef<'a, char>>>>(
+        expected: E,
+        found: Option<MaybeRef<'a, char>>,
+        span: SimpleSpan<usize>,
+    ) -> MyError<'a> {
+        MyError::Rich(
+            <Rich<'_, char, SimpleSpan<usize>, &'static str> as chumsky::error::Error<
+                '_,
+                &'_ str,
+            >>::expected_found::<E>(expected, found, span),
+        )
+    }
+}
+
+fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
     let headers = just("[")
         .ignore_then(text::ident())
         .then_ignore(just(":").then(whitespace()))
@@ -262,21 +281,31 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
             Ok(verb) => verb,
             Err(verb) => match verb.1 {
                 HttpVerb::Unknown => {
-                    emitter.emit(Rich::custom(
-                        e.span(),
-                        format!("Unknown HTTP verb {}. See https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods", verb_str.bold()),
-                    ));
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Unknown HTTP verb")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message(format!("Unknown HTTP verb {}", verb_str.bold()))
+                                .with_color(Color::Red),
+                        )
+                        .with_note("See https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods")
+                        .finish();
+                    emitter.emit(MyError::Report(report));
                     HttpVerb::Unknown
                 }
                 _ => {
-                    emitter.emit(Rich::custom(
-                        e.span(),
-                        format!(
-                            "Unknown HTTP verb {}. Did you mean {}?",
-                            verb_str.bold(),
-                            verb.0.bold()
-                        ),
-                    ));
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Unknown HTTP verb")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message(format!("Unknown HTTP verb {}", verb_str.bold()))
+                                .with_color(Color::Red),
+                        )
+                        .with_help(format!("Did you mean {}?", verb.0.bold()))
+                        .finish();
+                    emitter.emit(MyError::Report(report));
                     HttpVerb::Unknown
                 }
             },
@@ -288,7 +317,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
         .to_slice()
         .validate(|url: &str, e, emitter| {
             if reqwest::Url::parse(url).is_err() {
-                emitter.emit(Rich::custom(e.span(), "Invalid URL."))
+                emitter.emit(MyError::Rich(Rich::custom(e.span(), "Invalid URL")))
             }
             url
         })
@@ -306,13 +335,22 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
                         let column = err.column();
                         let span: SimpleSpan<usize> = e.span();
                         let new_span =
-                            SimpleSpan::new(span.start + column - 2, span.start + column - 1);
+                            SimpleSpan::new(span.start + column - 1, span.start + column - 1);
 
-                        emitter.emit(Rich::custom(e.span(), "Invalid JSON body."));
-                        emitter.emit(Rich::custom(
-                            new_span,
-                            format!("Invalid JSON body. {}", column),
-                        ));
+                        let report = Report::build(ReportKind::Error, (), new_span.start)
+                            .with_message("Invalid JSON body")
+                            .with_label(
+                                Label::new(new_span.into_range())
+                                    .with_message(err.to_string())
+                                    .with_color(Color::Yellow),
+                            )
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message("Invalid JSON body")
+                                    .with_color(Color::Red),
+                            )
+                            .finish();
+                        emitter.emit(MyError::Report(report));
 
                         return None;
                     }
@@ -328,26 +366,38 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
             match validate_http_code(code) {
                 Ok(code) => Some(code),
                 Err(Some((suggested_code, suggested_name))) => {
-                    emitter.emit(Rich::custom(
-                        e.span(),
-                        format!(
-                            "Invalid HTTP status code {}. Did you mean {} ({})?",
-                            code.bold(),
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid HTTP status code")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message(format!("Invalid HTTP status code {}", code.bold()))
+                                .with_color(Color::Red),
+                        )
+                        .with_help(format!(
+                            "Did you mean {} ({})?",
                             suggested_name.bold(),
-                            suggested_code.bold(),
-                        ),
-                    ));
+                            suggested_code.bold()
+                        ))
+                        .finish();
+                    emitter.emit(MyError::Report(report));
                     None
                 }
                 Err(None) => {
-                    emitter.emit(Rich::custom(
-                        e.span(),
-                        format!("Invalid HTTP status code {}. See https://developer.mozilla.org/en-US/docs/Web/HTTP/Status", code.bold()),
-                    ));
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid HTTP status code")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message(format!("Invalid HTTP status code {}", code.bold()))
+                                .with_color(Color::Red),
+                        )
+                        .with_note("See https://developer.mozilla.org/en-US/docs/Web/HTTP/Status for available status codes")
+                        .finish();
+                    emitter.emit(MyError::Report(report));
                     None
                 }
             }
-
         })
         .delimited_by(just("["), just("]"));
 
@@ -395,22 +445,40 @@ mod tests {
 
     #[test]
     fn http_verb_unknown() {
-        let input = r#"[A:   B][Ckdsf: Dsdf][PSTCH]<{ "hi}>": { "1": ["a" } }>(http://example.com/?hi=x%29a)[proxy auth requi]"#;
+        let input = r#"[A:   B}[Ckdsf: Dsdf][PSTCH]<{ "hi}>": { "1" ["a"] } }>(http://example.com/?hi=x%29a)[proxy auth requi]"#;
         let (ast, errors) = parser().parse(input).into_output_errors();
 
         println!("{:#?}", errors.len());
         println!("{:#?}", ast);
         errors.into_iter().for_each(|e| {
-            Report::build(ReportKind::Error, (), e.span().start)
-                .with_message(e.to_string())
-                .with_label(
-                    Label::new(e.span().into_range())
-                        .with_message(e.reason().to_string())
-                        .with_color(Color::Red),
-                )
-                .finish()
-                .print(Source::from(&input))
-                .unwrap()
+            match e {
+                MyError::Rich(e) => {
+                    let span: SimpleSpan<usize> = *e.span();
+                    Report::build(ReportKind::Error, (), span.start)
+                        .with_message(e.reason())
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message(e.reason())
+                                .with_color(Color::Red),
+                        )
+                        .finish()
+                        .print(Source::from(input))
+                        .unwrap();
+                }
+                MyError::Report(e) => {
+                    e.print(Source::from(input)).unwrap();
+                }
+            }
+            // Report::build(ReportKind::Error, (), e.span().start)
+            //     .with_message(e.to_string())
+            //     .with_label(
+            //         Label::new(e.span().into_range())
+            //             .with_message(e.reason().to_string())
+            //             .with_color(Color::Red),
+            //     )
+            //     .finish()
+            //     .print(Source::from(&input))
+            //     .unwrap()
         });
 
         // errors.iter().for_each(|e| println!("Parse error: {}", e));
