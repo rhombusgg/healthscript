@@ -1,13 +1,15 @@
 use chumsky::{
     extra::Err,
     prelude::*,
+    span::Span,
     text::{ascii::keyword, whitespace},
 };
+use serde_json::Value;
 use strsim::normalized_levenshtein;
 use yansi::Paint;
 
-pub type Span = SimpleSpan<usize>;
-pub type Spanned<T> = (T, Span);
+// pub type Span = SimpleSpan<usize>;
+// pub type Spanned<T> = (T, Span);
 
 #[derive(Debug)]
 enum Expr<'a> {
@@ -22,13 +24,34 @@ enum Expr<'a> {
 struct Http<'a> {
     RequestHeader: Vec<(&'a str, &'a str)>,
     Verb: Option<HttpVerb>,
-    // RequestBody: Vec<&'a str>,
+    RequestBody: Option<Body<'a>>,
     Url: &'a str,
     StatusCode: Option<u16>,
-    // ReponseBody: Vec<&'a str>,
+    // ReponseBody: Option<&'a str>,
     // ResponseHeader: Vec<(&'a str, &'a str)>,
     // Jq: Option<&'a str>,
     // Regex: Option<&'a str>,
+}
+
+#[derive(Clone, Debug)]
+enum Body<'a> {
+    Json(Value),
+    Text(&'a str),
+    Base64(&'a str),
+}
+
+#[derive(Clone, Debug)]
+enum HttpVerb {
+    Get,
+    Head,
+    Post,
+    Put,
+    Delete,
+    Connect,
+    Options,
+    Trace,
+    Patch,
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -47,20 +70,6 @@ struct Ping<'a> {
 struct Dns<'a> {
     Uri: &'a str,
     Server: &'a str,
-}
-
-#[derive(Clone, Debug)]
-enum HttpVerb {
-    Get,
-    Head,
-    Post,
-    Put,
-    Delete,
-    Connect,
-    Options,
-    Trace,
-    Patch,
-    Unknown,
 }
 
 fn closest_verb(verb: &str) -> Result<HttpVerb, (&'static str, HttpVerb)> {
@@ -274,8 +283,6 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
         })
         .delimited_by(just("["), just("]"));
 
-    // let body = text::ident().delimited_by(just('<'), just('>'));
-
     let url = none_of(")")
         .repeated()
         .to_slice()
@@ -286,6 +293,35 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
             url
         })
         .delimited_by(just("("), just(")"));
+
+    let body = any()
+        .and_is(just(">").then(url).not())
+        .repeated()
+        .to_slice()
+        .validate(|body: &str, e, emitter| {
+            if body.starts_with('{') && body.ends_with('}') {
+                match serde_json::from_str(body) {
+                    Ok(value) => return Some(Body::Json(value)),
+                    Err(err) => {
+                        let column = err.column();
+                        let span: SimpleSpan<usize> = e.span();
+                        let new_span =
+                            SimpleSpan::new(span.start + column - 2, span.start + column - 1);
+
+                        emitter.emit(Rich::custom(e.span(), "Invalid JSON body."));
+                        emitter.emit(Rich::custom(
+                            new_span,
+                            format!("Invalid JSON body. {}", column),
+                        ));
+
+                        return None;
+                    }
+                }
+            }
+
+            None
+        })
+        .delimited_by(just("<"), just(">"));
 
     let status_code = none_of("]").repeated().to_slice()
         .validate(|code: &str, e, emitter| {
@@ -310,7 +346,6 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
                     ));
                     None
                 }
-            
             }
 
         })
@@ -322,12 +357,14 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<Rich<'a, char>>
 
     let http = headers
         .then(http_verb.repeated().at_most(1).collect::<Vec<_>>())
+        .then(body.repeated().at_most(1).collect::<Vec<_>>())
         .then(url)
         .then(status_code.repeated().at_most(1).collect::<Vec<_>>())
-        .map(|(((request_headers, verb), url), status_code)| {
+        .map(|((((request_headers, verb), body), url), status_code)| {
             Expr::Http(Http {
                 RequestHeader: request_headers,
                 Verb: verb.get(0).cloned(),
+                RequestBody: body.get(0).cloned().flatten(),
                 Url: url,
                 StatusCode: status_code.get(0).cloned().flatten(),
             })
@@ -358,7 +395,7 @@ mod tests {
 
     #[test]
     fn http_verb_unknown() {
-        let input = "[A:   B][Ckdsf: Dsdf][PSTCH](http://example.com/?hi=x%29a)[proxy auth requi]";
+        let input = r#"[A:   B][Ckdsf: Dsdf][PSTCH]<{ "hi}>": { "1": ["a" } }>(http://example.com/?hi=x%29a)[proxy auth requi]"#;
         let (ast, errors) = parser().parse(input).into_output_errors();
 
         println!("{:#?}", errors.len());
