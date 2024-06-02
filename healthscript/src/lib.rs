@@ -25,7 +25,7 @@ impl Display for Expr<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Expr::Http(http) => write!(f, "{}", http),
-            Expr::Tcp(tcp) => write!(f, "{}", tcp.uri),
+            Expr::Tcp(tcp) => write!(f, "{}", tcp),
             Expr::Ping(ping) => write!(f, "{}", ping.uri),
             Expr::Dns(dns) => write!(f, "{}", dns.uri),
             Expr::Invalid => write!(f, "Invalid"),
@@ -39,6 +39,7 @@ pub struct Http<'a> {
     verb: Option<HttpVerb>,
     request_body: Option<HttpRequestBody<'a>>,
     url: &'a str,
+    timeout: Option<u64>,
     status_code: Option<u16>,
     response_headers: Vec<(&'a str, &'a str)>,
     response_body: Option<HttpResponseBody<'a>>,
@@ -60,7 +61,11 @@ impl Display for Http<'_> {
 
         write!(f, "({})", self.url)?;
 
-        if let Some(status_code) = &self.status_code {
+        if let Some(timeout) = self.timeout {
+            write!(f, "[{}s]", timeout)?;
+        }
+
+        if let Some(status_code) = self.status_code {
             write!(f, "[{}]", status_code)?;
         }
 
@@ -142,8 +147,20 @@ impl Display for HttpVerb {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Tcp<'a> {
     uri: &'a str,
-    timeout: Option<u16>,
-    regex: Option<&'a str>,
+    timeout: Option<u64>,
+    // regex: Option<&'a str>,
+}
+
+impl Display for Tcp<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(tcp://{})", self.uri)?;
+
+        if let Some(timeout) = self.timeout {
+            write!(f, "[{}s]", timeout)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -396,6 +413,37 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         })
         .delimited_by(just("["), just("]"));
 
+    let timeout = text::int(10)
+        .then(none_of("]"))
+        .validate(|(time, unit): (&str, char), e, emitter| {
+            let span: SimpleSpan<usize> = e.span();
+            let time = time.parse::<u64>().unwrap();
+
+            match unit {
+                's' => Some(time),
+                'm' => Some(time * 60),
+                _ => {
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid timeout")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message("Invalid timeout duration")
+                                .with_color(Color::Red),
+                        )
+                        .with_help(format!(
+                            "Did you mean {}{}?",
+                            time.to_string().bold(),
+                            's'.bold().yellow()
+                        ))
+                        .with_note("Timeouts must be a number followed by a unit (s, m)")
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                    None
+                }
+            }
+        })
+        .delimited_by(just("["), just("]"));
+
     let url = none_of(")")
         .repeated()
         .to_slice()
@@ -640,36 +688,47 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         })
         .delimited_by(just("["), just("]"));
 
-    // let jq = just(".").then(text::ident());
-
-    // let regex = text::ident().delimited_by(just('/'), just('/'));
-
     let http = headers
         .then(http_verb.repeated().at_most(1).collect::<Vec<_>>())
         .then(request_body.repeated().at_most(1).collect::<Vec<_>>())
         .then(url)
+        .then(timeout.repeated().at_most(1).collect::<Vec<_>>())
         .then(status_code.repeated().at_most(1).collect::<Vec<_>>())
         .then(response_body.repeated().at_most(1).collect::<Vec<_>>())
         .then(headers)
         .map(
             |(
-                (((((request_headers, verb), request_body), url), status_code), response_body),
+                (
+                    (((((request_headers, verb), request_body), url), timeout), status_code),
+                    response_body,
+                ),
                 response_headers,
             )| {
-                Expr::Http(Http {
+                Http {
                     request_headers,
                     verb: verb.first().cloned().flatten(),
                     request_body: request_body.first().cloned().flatten(),
                     url,
+                    timeout: timeout.first().copied().flatten(),
                     status_code: status_code.first().cloned().flatten(),
                     response_body: response_body.first().cloned().flatten(),
                     response_headers,
-                })
+                }
             },
         );
-    http
 
-    // uri.map(|x| Expr::Http(x))
+    let tcp_url = just("tcp://")
+        .ignore_then(none_of(")").repeated().to_slice())
+        .delimited_by(just("("), just(")"));
+
+    let tcp = tcp_url
+        .then(timeout.repeated().at_most(1).collect::<Vec<_>>())
+        .map(|(uri, timeout)| Tcp {
+            uri,
+            timeout: timeout.first().copied().flatten(),
+        });
+
+    tcp.map(|t| Expr::Tcp(t)).or(http.map(|h| Expr::Http(h)))
 }
 
 pub fn parse(input: &str) -> (Option<Expr>, Vec<String>) {
