@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{fmt::Display, ops::Range};
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use base64::Engine;
@@ -20,28 +20,60 @@ pub enum Expr<'a> {
     Invalid,
 }
 
+impl Display for Expr<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Http(http) => write!(f, "{}", http),
+            Expr::Tcp(tcp) => write!(f, "{}", tcp.uri),
+            Expr::Ping(ping) => write!(f, "{}", ping.uri),
+            Expr::Dns(dns) => write!(f, "{}", dns.uri),
+            Expr::Invalid => write!(f, "Invalid"),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
-struct Http<'a> {
-    RequestHeader: Vec<(&'a str, &'a str)>,
-    Verb: Option<HttpVerb>,
-    RequestBody: Option<HttpBody<'a>>,
-    Url: &'a str,
-    StatusCode: Option<u16>,
-    // ReponseBody: Option<&'a str>,
-    // ResponseHeader: Vec<(&'a str, &'a str)>,
-    // Jq: Option<&'a str>,
-    // Regex: Option<&'a str>,
+pub struct Http<'a> {
+    request_header: Vec<(&'a str, &'a str)>,
+    verb: Option<HttpVerb>,
+    request_body: Option<HttpBody<'a>>,
+    url: &'a str,
+    status_code: Option<u16>,
+    // reponse_body: Option<&'a str>,
+    // response_header: Vec<(&'a str, &'a str)>,
+    // jq: Option<&'a str>,
+    // regex: Option<&'a str>,
+}
+
+impl Display for Http<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(verb) = &self.verb {
+            write!(f, "[{}]", format!("{:?}", verb).to_uppercase())?;
+        }
+
+        if let Some(body) = &self.request_body {
+            match body {
+                HttpBody::Json(value) => write!(f, "<{}>", value)?,
+                HttpBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
+                HttpBody::Base64(base64) => write!(f, "<{}>", base64)?,
+            }
+        }
+
+        write!(f, "({})", self.url)?;
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum HttpBody<'a> {
+pub enum HttpBody<'a> {
     Json(Value),
     Text(&'a str),
     Base64(&'a str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum HttpVerb {
+pub enum HttpVerb {
     Get,
     Head,
     Post,
@@ -54,21 +86,21 @@ enum HttpVerb {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Tcp<'a> {
-    Uri: &'a str,
-    Timeout: Option<u16>,
-    Regex: Option<&'a str>,
+pub struct Tcp<'a> {
+    uri: &'a str,
+    timeout: Option<u16>,
+    regex: Option<&'a str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Ping<'a> {
-    Uri: &'a str,
+pub struct Ping<'a> {
+    uri: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Dns<'a> {
-    Uri: &'a str,
-    Server: &'a str,
+pub struct Dns<'a> {
+    uri: &'a str,
+    server: &'a str,
 }
 
 fn closest_verb(verb: &str) -> Result<HttpVerb, Option<(&'static str, HttpVerb)>> {
@@ -438,11 +470,11 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         .then(status_code.repeated().at_most(1).collect::<Vec<_>>())
         .map(|((((request_headers, verb), body), url), status_code)| {
             Expr::Http(Http {
-                RequestHeader: request_headers,
-                Verb: verb.get(0).cloned().flatten(),
-                RequestBody: body.get(0).cloned().flatten(),
-                Url: url,
-                StatusCode: status_code.get(0).cloned().flatten(),
+                request_header: request_headers,
+                verb: verb.get(0).cloned().flatten(),
+                request_body: body.get(0).cloned().flatten(),
+                url,
+                status_code: status_code.get(0).cloned().flatten(),
             })
         });
     http

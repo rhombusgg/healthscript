@@ -12,11 +12,11 @@ fn http_verb() {
         Some(
             Http(
                 Http {
-                    RequestHeader: [],
-                    Verb: None,
-                    RequestBody: None,
-                    Url: "https://example.com",
-                    StatusCode: None,
+                    request_header: [],
+                    verb: None,
+                    request_body: None,
+                    url: "https://example.com",
+                    status_code: None,
                 },
             ),
         )
