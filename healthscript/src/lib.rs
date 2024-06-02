@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use ariadne::{Color, Label, Report, ReportKind};
+use ariadne::{Color, Label, Report, ReportKind, Source};
 use base64::Engine;
 use chumsky::{prelude::*, text::whitespace, util::MaybeRef};
 
@@ -11,8 +11,8 @@ use yansi::Paint;
 // pub type Span = SimpleSpan<usize>;
 // pub type Spanned<T> = (T, Span);
 
-#[derive(Debug)]
-enum Expr<'a> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Expr<'a> {
     Http(Http<'a>),
     Tcp(Tcp<'a>),
     Ping(Ping<'a>),
@@ -20,7 +20,7 @@ enum Expr<'a> {
     Invalid,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Http<'a> {
     RequestHeader: Vec<(&'a str, &'a str)>,
     Verb: Option<HttpVerb>,
@@ -33,14 +33,14 @@ struct Http<'a> {
     // Regex: Option<&'a str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum HttpBody<'a> {
     Json(Value),
     Text(&'a str),
     Base64(&'a str),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum HttpVerb {
     Get,
     Head,
@@ -51,28 +51,27 @@ enum HttpVerb {
     Options,
     Trace,
     Patch,
-    Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Tcp<'a> {
     Uri: &'a str,
     Timeout: Option<u16>,
     Regex: Option<&'a str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Ping<'a> {
     Uri: &'a str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Dns<'a> {
     Uri: &'a str,
     Server: &'a str,
 }
 
-fn closest_verb(verb: &str) -> Result<HttpVerb, (&'static str, HttpVerb)> {
+fn closest_verb(verb: &str) -> Result<HttpVerb, Option<(&'static str, HttpVerb)>> {
     match verb {
         "GET" => Ok(HttpVerb::Get),
         "HEAD" => Ok(HttpVerb::Head),
@@ -97,21 +96,21 @@ fn closest_verb(verb: &str) -> Result<HttpVerb, (&'static str, HttpVerb)> {
                 ("PATCH", HttpVerb::Patch),
             ];
 
-            let mut closest = ("", HttpVerb::Unknown);
+            let mut closest = None;
             let mut distance = 0.0;
 
             for v in verbs.iter() {
                 let d = normalized_levenshtein(&lower, v.0);
                 if d > distance {
                     distance = d;
-                    closest = v.clone();
+                    closest = Some(v.clone());
                 }
             }
 
             if distance > 0.5 {
                 Err(closest)
             } else {
-                Err(("", HttpVerb::Unknown))
+                Err(None)
             }
         }
     }
@@ -277,9 +276,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
 
     let http_verb = text::ident()
         .validate(|verb_str: &str, e, emitter| match closest_verb(verb_str) {
-            Ok(verb) => verb,
-            Err(verb) => match verb.1 {
-                HttpVerb::Unknown => {
+            Ok(verb) => Some(verb),
+            Err(verb) => match verb {
+                None => {
                     let span: SimpleSpan<usize> = e.span();
                     let report = Report::build(ReportKind::Error, (), span.start)
                         .with_message("Unknown HTTP verb")
@@ -291,9 +290,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                         .with_note("See https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods")
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    HttpVerb::Unknown
+                    None
                 }
-                _ => {
+                Some(v) => {
                     let span: SimpleSpan<usize> = e.span();
                     let report = Report::build(ReportKind::Error, (), span.start)
                         .with_message("Unknown HTTP verb")
@@ -302,10 +301,10 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                                 .with_message(format!("Unknown HTTP verb {}", verb_str.bold()))
                                 .with_color(Color::Red),
                         )
-                        .with_help(format!("Did you mean {}?", verb.0.bold()))
+                        .with_help(format!("Did you mean {}?", v.0.bold()))
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    HttpVerb::Unknown
+                    None
                 }
             },
         })
@@ -440,7 +439,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         .map(|((((request_headers, verb), body), url), status_code)| {
             Expr::Http(Http {
                 RequestHeader: request_headers,
-                Verb: verb.get(0).cloned(),
+                Verb: verb.get(0).cloned().flatten(),
                 RequestBody: body.get(0).cloned().flatten(),
                 Url: url,
                 StatusCode: status_code.get(0).cloned().flatten(),
@@ -451,90 +450,35 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
     // uri.map(|x| Expr::Http(x))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ariadne::{Color, Label, Report, ReportKind, Source};
-    use expect_test::expect;
+pub fn parse(input: &str) -> (Option<Expr>, Vec<String>) {
+    let (ast, errors) = parser().parse(input).into_output_errors();
 
-    // #[test]
-    // fn http_verb_get() {
-    //     let verb = "[GET]";
-    //     let actual = parser().parse(verb).unwrap();
-
-    //     let expected = expect![[r#"
-    //         Verb(
-    //             GET,
-    //         )
-    //     "#]];
-    //     expected.assert_debug_eq(&actual);
-    // }
-
-    #[test]
-    fn http_verb_unknown() {
-        let input = r#"[A:   B}[Ckdsf: Dsdf][PSTCH]<+uwgVQA=>(http://example.com/?hi=x%29a)[proxy auth requi]"#;
-        let (ast, errors) = parser().parse(input).into_output_errors();
-
-        println!("{:#?}", errors.len());
-        println!("{:#?}", ast);
-        errors.into_iter().for_each(|e| {
-            match e {
-                MyError::Rich(e) => {
-                    let span: SimpleSpan<usize> = *e.span();
-                    Report::build(ReportKind::Error, (), span.start)
+    let mut errs = Vec::new();
+    errors.into_iter().for_each(|e| match e {
+        MyError::Rich(e) => {
+            let span: SimpleSpan<usize> = *e.span();
+            let e = Report::build(ReportKind::Error, (), span.start)
+                .with_message(e.reason())
+                .with_label(
+                    Label::new(span.into_range())
                         .with_message(e.reason())
-                        .with_label(
-                            Label::new(span.into_range())
-                                .with_message(e.reason())
-                                .with_color(Color::Red),
-                        )
-                        .finish()
-                        .print(Source::from(input))
-                        .unwrap();
-                }
-                MyError::Report(e) => {
-                    e.print(Source::from(input)).unwrap();
-                }
-            }
-            // Report::build(ReportKind::Error, (), e.span().start)
-            //     .with_message(e.to_string())
-            //     .with_label(
-            //         Label::new(e.span().into_range())
-            //             .with_message(e.reason().to_string())
-            //             .with_color(Color::Red),
-            //     )
-            //     .finish()
-            //     .print(Source::from(&input))
-            //     .unwrap()
-        });
+                        .with_color(Color::Red),
+                )
+                .finish();
+            let mut report = Vec::<u8>::new();
+            e.write_for_stdout(Source::from(input), &mut report)
+                .unwrap();
+            let report = String::from_utf8_lossy(&report).into_owned();
+            errs.push(report);
+        }
+        MyError::Report(e) => {
+            let mut report = Vec::<u8>::new();
+            e.write_for_stdout(Source::from(input), &mut report)
+                .unwrap();
+            let report = String::from_utf8_lossy(&report).into_owned();
+            errs.push(report);
+        }
+    });
 
-        // errors.iter().for_each(|e| println!("Parse error: {}", e));
-
-        // println!("{}", errors.len());
-
-        // let span = errors[0].span();
-        // let msg = errors[0].to_string();
-        // let reason = errors[0].reason();
-
-        // println!("{:#?}", reason);
-
-        // let mut report = Vec::<u8>::new();
-        // Report::build(ReportKind::Error, (), span.start)
-        //     .with_message("Parse error")
-        //     .with_label(Label::new(span).with_message(msg).with_color(Color::Red))
-        //     .finish()
-        //     .write_for_stdout(Source::from(input), &mut report)
-        //     .unwrap();
-        // let report = String::from_utf8_lossy(&report).into_owned();
-        // println!("{}", report);
-
-        assert!(false);
-
-        // let expected = expect![[r#"
-        //     Verb(
-        //         GET,
-        //     )
-        // "#]];
-        // expected.assert_debug_eq(&report);
-    }
+    (ast, errs)
 }
