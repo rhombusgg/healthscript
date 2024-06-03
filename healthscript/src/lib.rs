@@ -60,6 +60,12 @@ enum HttpResponse<'a> {
     Header((&'a str, &'a str)),
 }
 
+#[derive(Debug)]
+enum TcpResponse<'a> {
+    Timeout(Spanned<Option<u64>>),
+    Body(Spanned<TcpResponseBody<'a>>),
+}
+
 impl Display for Http<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (name, value) in self.request_headers.iter() {
@@ -142,6 +148,27 @@ impl Display for HttpResponseBody<'_> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum TcpResponseBody<'a> {
+    Text(&'a str),
+    Base64(&'a str),
+    Regex(Regex),
+    Invalid,
+}
+
+impl Display for TcpResponseBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TcpResponseBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
+            TcpResponseBody::Base64(base64) => write!(f, "<{}>", base64)?,
+            TcpResponseBody::Regex(r) => write!(f, "<{}>", r)?,
+            TcpResponseBody::Invalid => write!(f, "")?,
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpVerb {
     Get,
@@ -164,11 +191,11 @@ impl Display for HttpVerb {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Tcp<'a> {
     uri: &'a str,
     timeout: Option<u64>,
-    // regex: Option<&'a str>,
+    response_body: Option<TcpResponseBody<'a>>,
 }
 
 impl Display for Tcp<'_> {
@@ -177,6 +204,10 @@ impl Display for Tcp<'_> {
 
         if let Some(timeout) = self.timeout {
             write!(f, "[{}s]", timeout)?;
+        }
+
+        if let Some(body) = &self.response_body {
+            write!(f, "{}", body)?;
         }
 
         Ok(())
@@ -1006,13 +1037,182 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         },
     );
 
+    let tcp_response_body = recursive(|response_body| {
+        let not_next = |end_delimiter: chumsky::primitive::Just<_, _, _>| {
+            any()
+                .and_is(end_delimiter.then(end()).not())
+                .and_is(end_delimiter.then(header).not())
+                .and_is(end_delimiter.then(status_code).not())
+                .and_is(end_delimiter.then(response_body.clone()).not())
+                .repeated()
+                .to_slice()
+        };
+
+        let body_text = not_next(just("\">"))
+            .validate(|body: &str, e, _emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                (TcpResponseBody::Text(body), span)
+            })
+            .delimited_by(just("<\""), just("\">"));
+
+        let body_base64 = not_next(just(">"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match base64::prelude::BASE64_STANDARD.decode(body) {
+                    Ok(_) => (TcpResponseBody::Base64(body), span),
+                    Err(_) => {
+                        let report = Report::build(ReportKind::Error, (), span.start)
+                            .with_message("Invalid base64 response body")
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message("Invalid base64 response body")
+                                    .with_color(Color::Red),
+                            )
+                            .with_note("For raw string literals, wrap the string in double quotes")
+                            .with_help(format!(
+                                "Did you mean {}{}{}{}{}?",
+                                "<".bold(),
+                                '"'.bold().green(),
+                                body.bold(),
+                                '"'.bold().green(),
+                                ">".bold()
+                            ))
+                            .finish();
+                        emitter.emit(MyError::Report(report));
+                        (TcpResponseBody::Invalid, span)
+                    }
+                }
+            })
+            .delimited_by(just("<"), just(">"));
+
+        let body_regex = not_next(just("/>"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match Regex::new(body) {
+                    Ok(re) => (TcpResponseBody::Regex(re), span),
+                    Err(err) => {
+                        let report = Report::build(ReportKind::Error, (), span.start)
+                            .with_message("Invalid regex response body")
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message(err.to_string())
+                                    .with_color(Color::Red),
+                            )
+                            .finish();
+                        emitter.emit(MyError::Report(report));
+                        (TcpResponseBody::Invalid, span)
+                    }
+                }
+            })
+            .delimited_by(just("</"), just("/>"));
+
+        choice((body_text, body_regex, body_base64))
+    });
+
     let tcp_url = just("tcp://")
         .ignore_then(none_of(")").repeated().to_slice())
         .delimited_by(just("("), just(")"));
 
     let tcp = tcp_url
-        .then(timeout.repeated().at_most(1).collect::<Vec<_>>())
-        .map(|(uri, timeout)| Tcp { uri, timeout: None });
+        .then(
+            choice((
+                timeout.map(|t| TcpResponse::Timeout(t)),
+                tcp_response_body.map(|b| TcpResponse::Body(b)),
+            ))
+            .repeated()
+            .collect::<Vec<_>>(),
+        )
+        .validate(|(uri, responses), e, emitter| {
+            let timeout = {
+                let timeouts = responses
+                    .iter()
+                    .filter_map(|r| match r {
+                        TcpResponse::Timeout(t) => match t.0 {
+                            Some(d) => Some((d, t.1)),
+                            None => None,
+                        },
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                if timeouts.len() > 1 {
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Multiple timeouts")
+                        .with_labels(
+                            timeouts
+                                .iter()
+                                .enumerate()
+                                .map(|(i, timeout)| {
+                                    Label::new(timeout.1.into_range())
+                                        .with_message(format!(
+                                            "Specified timeout {} here",
+                                            (i + 1).italic()
+                                        ))
+                                        .with_color(Color::Red)
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                }
+
+                timeouts.first().map(|t| t.0)
+            };
+
+            let response_body = {
+                let bodies = responses
+                    .iter()
+                    .filter_map(|r| match r {
+                        TcpResponse::Body(b) => match b.0 {
+                            TcpResponseBody::Invalid => None,
+                            _ => Some(b),
+                        },
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                if bodies.len() > 1 {
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Multiple response bodies")
+                        .with_labels(
+                            bodies
+                                .iter()
+                                .map(|body| {
+                                    let body_span = match body.0 {
+                                        TcpResponseBody::Text(_) => "text",
+                                        TcpResponseBody::Base64(_) => "base64",
+                                        TcpResponseBody::Regex(_) => "regex",
+                                        _ => "invalid",
+                                    };
+
+                                    Label::new(body.1.into_range())
+                                        .with_message(format!(
+                                            "Specified {} response body here",
+                                            body_span
+                                        ))
+                                        .with_color(Color::Red)
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                }
+
+                bodies.first().map(|b| b.0.clone())
+            };
+
+            (uri, timeout, response_body)
+        })
+        .map(|(uri, timeout, response_body)| Tcp {
+            uri,
+            timeout,
+            response_body,
+        });
 
     tcp.map(|t| Expr::Tcp(t)).or(http.map(|h| Expr::Http(h)))
 }
