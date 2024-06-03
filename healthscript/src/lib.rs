@@ -9,8 +9,8 @@ use serde_json::Value;
 use strsim::normalized_levenshtein;
 use yansi::Paint;
 
-// pub type Span = SimpleSpan<usize>;
-// pub type Spanned<T> = (T, Span);
+pub type Span = SimpleSpan<usize>;
+pub type Spanned<T> = (T, Span);
 
 #[derive(Debug)]
 pub enum Expr<'a> {
@@ -45,6 +45,21 @@ pub struct Http<'a> {
     response_body: Option<HttpResponseBody<'a>>,
 }
 
+#[derive(Debug)]
+enum HttpRequest<'a> {
+    Header((&'a str, &'a str)),
+    Verb(Spanned<HttpVerb>),
+    Body(Spanned<HttpRequestBody<'a>>),
+}
+
+#[derive(Debug)]
+enum HttpResponse<'a> {
+    Timeout(Spanned<Option<u64>>),
+    StatusCode(Spanned<Option<u16>>),
+    Body(Spanned<HttpResponseBody<'a>>),
+    Header((&'a str, &'a str)),
+}
+
 impl Display for Http<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (name, value) in self.request_headers.iter() {
@@ -69,12 +84,12 @@ impl Display for Http<'_> {
             write!(f, "[{}]", status_code)?;
         }
 
-        if let Some(body) = &self.response_body {
-            write!(f, "{}", body)?;
-        }
-
         for (name, value) in self.response_headers.iter() {
             write!(f, "[{}: {}]", name, value)?;
+        }
+
+        if let Some(body) = &self.response_body {
+            write!(f, "{}", body)?;
         }
 
         Ok(())
@@ -86,6 +101,7 @@ pub enum HttpRequestBody<'a> {
     Json(Value),
     Text(&'a str),
     Base64(&'a str),
+    Invalid,
 }
 
 impl Display for HttpRequestBody<'_> {
@@ -94,6 +110,7 @@ impl Display for HttpRequestBody<'_> {
             HttpRequestBody::Json(value) => write!(f, "<{}>", value)?,
             HttpRequestBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
             HttpRequestBody::Base64(base64) => write!(f, "<{}>", base64)?,
+            HttpRequestBody::Invalid => write!(f, "")?,
         }
 
         Ok(())
@@ -107,6 +124,7 @@ pub enum HttpResponseBody<'a> {
     Base64(&'a str),
     Jq { body: &'a str, expr: jaq_syn::Main },
     Regex(Regex),
+    Invalid,
 }
 
 impl Display for HttpResponseBody<'_> {
@@ -117,6 +135,7 @@ impl Display for HttpResponseBody<'_> {
             HttpResponseBody::Base64(base64) => write!(f, "<{}>", base64)?,
             HttpResponseBody::Jq { body, expr: _ } => write!(f, "<({})>", body)?,
             HttpResponseBody::Regex(r) => write!(f, "<{}>", r)?,
+            HttpResponseBody::Invalid => write!(f, "")?,
         }
 
         Ok(())
@@ -134,6 +153,7 @@ pub enum HttpVerb {
     Options,
     Trace,
     Patch,
+    Invalid,
 }
 
 impl Display for HttpVerb {
@@ -369,17 +389,15 @@ impl<'a> chumsky::error::Error<'a, &'a str> for MyError<'a> {
 }
 
 fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
-    let headers = just("[")
+    let header = just("[")
         .ignore_then(text::ident())
         .then_ignore(just(":").then(whitespace()))
         .then(text::ident())
-        .then_ignore(just("]").recover_with(skip_then_retry_until(any().ignored(), end())))
-        .repeated()
-        .collect::<Vec<_>>();
+        .then_ignore(just("]").recover_with(skip_then_retry_until(any().ignored(), end())));
 
     let http_verb = text::ident()
         .validate(|verb_str: &str, e, emitter| match closest_verb(verb_str) {
-            Ok(verb) => Some(verb),
+            Ok(verb) => (verb, e.span()),
             Err(verb) => match verb {
                 None => {
                     let span: SimpleSpan<usize> = e.span();
@@ -393,7 +411,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                         .with_note("See https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods")
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    None
+                    (HttpVerb::Invalid, e.span())
                 }
                 Some(v) => {
                     let span: SimpleSpan<usize> = e.span();
@@ -407,7 +425,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                         .with_help(format!("Did you mean {}?", v.0.bold()))
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    None
+                    (HttpVerb::Invalid, e.span())
                 }
             },
         })
@@ -420,8 +438,8 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
             let time = time.parse::<u64>().unwrap();
 
             match unit {
-                's' => Some(time),
-                'm' => Some(time * 60),
+                's' => (Some(time), span),
+                'm' => (Some(time * 60), span),
                 _ => {
                     let report = Report::build(ReportKind::Error, (), span.start)
                         .with_message("Invalid timeout")
@@ -438,7 +456,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                         .with_note("Timeouts must be a number followed by a unit (s, m)")
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    None
+                    (None, span)
                 }
             }
         })
@@ -455,20 +473,28 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         })
         .delimited_by(just("("), just(")"));
 
-    let request_body = any()
-        .and_is(just(">").then(url).not())
-        .repeated()
-        .to_slice()
-        .validate(|body: &str, e, emitter| {
-            let span: SimpleSpan<usize> = e.span();
+    let request_body = recursive(|request_body| {
+        let not_next = |end_delimiter: chumsky::primitive::Just<_, _, _>| {
+            any()
+                .and_is(end_delimiter.then(end()).not())
+                .and_is(end_delimiter.then(url).not())
+                .and_is(end_delimiter.then(header).not())
+                .and_is(end_delimiter.then(http_verb).not())
+                .and_is(end_delimiter.then(request_body.clone()).not())
+                .repeated()
+                .to_slice()
+        };
 
-            if body.starts_with('{') && body.ends_with('}') {
-                match serde_json::from_str(body) {
-                    Ok(value) => return Some(HttpRequestBody::Json(value)),
+        let body_json = not_next(just("}>"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match serde_json::from_str(format!("{{{}}}", body).as_str()) {
+                    Ok(value) => (HttpRequestBody::Json(value), span),
                     Err(err) => {
                         let column = err.column();
                         let json_span =
-                            SimpleSpan::new(span.start + column - 1, span.start + column - 1);
+                            SimpleSpan::new(span.start + column - 2, span.start + column - 2);
 
                         let report = Report::build(ReportKind::Error, (), json_span.start)
                             .with_message("Invalid JSON request body")
@@ -485,57 +511,115 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                             .finish();
                         emitter.emit(MyError::Report(report));
 
-                        return None;
+                        (HttpRequestBody::Invalid, span)
                     }
                 }
-            }
+            })
+            .delimited_by(just("<{"), just("}>"));
 
-            if body.starts_with('"') && body.ends_with('"') {
-                return Some(HttpRequestBody::Text(&body[1..body.len() - 1]));
-            }
+        let body_text = not_next(just("\">"))
+            .validate(|body: &str, e, _emitter| {
+                let span: SimpleSpan<usize> = e.span();
 
-            match base64::prelude::BASE64_STANDARD.decode(body) {
-                Ok(_) => return Some(HttpRequestBody::Base64(body)),
-                Err(_) => {
+                (HttpRequestBody::Text(body), span)
+            })
+            .delimited_by(just("<\""), just("\">"));
+
+        let body_base64 = not_next(just(">"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match base64::prelude::BASE64_STANDARD.decode(body) {
+                    Ok(_) => (HttpRequestBody::Base64(body), span),
+                    Err(_) => {
+                        let report = Report::build(ReportKind::Error, (), span.start)
+                            .with_message("Invalid base64 request body")
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message("Invalid base64 request body")
+                                    .with_color(Color::Red),
+                            )
+                            .with_note("For raw string literals, wrap the string in double quotes")
+                            .with_help(format!(
+                                "Did you mean {}{}{}{}{}?",
+                                "<".bold(),
+                                '"'.bold().green(),
+                                body.bold(),
+                                '"'.bold().green(),
+                                ">".bold()
+                            ))
+                            .finish();
+                        emitter.emit(MyError::Report(report));
+                        (HttpRequestBody::Invalid, span)
+                    }
+                }
+            })
+            .delimited_by(just("<"), just(">"));
+
+        choice((body_json, body_text, body_base64))
+    });
+
+    let status_code = none_of("]").repeated().to_slice()
+        .validate(|code: &str, e, emitter| {
+            match validate_http_code(code) {
+                Ok(code) => (Some(code), e.span()),
+                Err(Some((suggested_code, suggested_name))) => {
+                    let span: SimpleSpan<usize> = e.span();
                     let report = Report::build(ReportKind::Error, (), span.start)
-                        .with_message("Invalid base64 request body")
+                        .with_message("Invalid HTTP status code")
                         .with_label(
                             Label::new(span.into_range())
-                                .with_message("Invalid base64 request body")
+                                .with_message(format!("Invalid HTTP status code {}", code.bold()))
                                 .with_color(Color::Red),
                         )
-                        .with_note("For raw string literals, wrap the string in double quotes")
                         .with_help(format!(
-                            "Did you mean {}{}{}{}{}?",
-                            "<".bold(),
-                            '"'.bold().green(),
-                            body.bold(),
-                            '"'.bold().green(),
-                            ">".bold()
+                            "Did you mean {} ({})?",
+                            suggested_name.bold(),
+                            suggested_code.bold()
                         ))
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    None
+                    (None, span)
+                }
+                Err(None) => {
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid HTTP status code")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message(format!("Invalid HTTP status code {}", code.bold()))
+                                .with_color(Color::Red),
+                        )
+                        .with_note("See https://developer.mozilla.org/en-US/docs/Web/HTTP/Status for available status codes")
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                    (None, span)
                 }
             }
         })
-        .delimited_by(just("<"), just(">"));
+        .delimited_by(just("["), just("]"));
 
-    let response_body = any()
-        .and_is(just(">").then(headers).not())
-        .and_is(just(">").then(end()).not())
-        .repeated()
-        .to_slice()
-        .validate(|body: &str, e, emitter| {
-            let span: SimpleSpan<usize> = e.span();
+    let response_body = recursive(|response_body| {
+        let not_next = |end_delimiter: chumsky::primitive::Just<_, _, _>| {
+            any()
+                .and_is(end_delimiter.then(end()).not())
+                .and_is(end_delimiter.then(header).not())
+                .and_is(end_delimiter.then(status_code).not())
+                .and_is(end_delimiter.then(response_body.clone()).not())
+                .repeated()
+                .to_slice()
+        };
 
-            if body.starts_with('{') && body.ends_with('}') {
-                match serde_json::from_str(body) {
-                    Ok(value) => return Some(HttpResponseBody::Json(value)),
+        let body_json = not_next(just("}>"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match serde_json::from_str(format!("{{{}}}", body).as_str()) {
+                    Ok(value) => (HttpResponseBody::Json(value), span),
                     Err(err) => {
                         let column = err.column();
                         let json_span =
-                            SimpleSpan::new(span.start + column - 1, span.start + column - 1);
+                            SimpleSpan::new(span.start + column - 2, span.start + column - 2);
 
                         let report = Report::build(ReportKind::Error, (), json_span.start)
                             .with_message("Invalid JSON response body")
@@ -546,24 +630,63 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                             )
                             .with_label(
                                 Label::new(span.into_range())
-                                    .with_message("Invalid JSON request body")
+                                    .with_message("Invalid JSON response body")
                                     .with_color(Color::Red),
                             )
                             .finish();
                         emitter.emit(MyError::Report(report));
 
-                        return None;
+                        (HttpResponseBody::Invalid, span)
                     }
                 }
-            }
+            })
+            .delimited_by(just("<{"), just("}>"));
 
-            if body.starts_with('"') && body.ends_with('"') {
-                return Some(HttpResponseBody::Text(&body[1..body.len() - 1]));
-            }
+        let body_text = not_next(just("\">"))
+            .validate(|body: &str, e, _emitter| {
+                let span: SimpleSpan<usize> = e.span();
 
-            if body.starts_with('/') && body.ends_with('/') {
-                return match Regex::new(&body[1..body.len() - 1]) {
-                    Ok(re) => Some(HttpResponseBody::Regex(re)),
+                (HttpResponseBody::Text(body), span)
+            })
+            .delimited_by(just("<\""), just("\">"));
+
+        let body_base64 = not_next(just(">"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match base64::prelude::BASE64_STANDARD.decode(body) {
+                    Ok(_) => (HttpResponseBody::Base64(body), span),
+                    Err(_) => {
+                        let report = Report::build(ReportKind::Error, (), span.start)
+                            .with_message("Invalid base64 response body")
+                            .with_label(
+                                Label::new(span.into_range())
+                                    .with_message("Invalid base64 response body")
+                                    .with_color(Color::Red),
+                            )
+                            .with_note("For raw string literals, wrap the string in double quotes")
+                            .with_help(format!(
+                                "Did you mean {}{}{}{}{}?",
+                                "<".bold(),
+                                '"'.bold().green(),
+                                body.bold(),
+                                '"'.bold().green(),
+                                ">".bold()
+                            ))
+                            .finish();
+                        emitter.emit(MyError::Report(report));
+                        (HttpResponseBody::Invalid, span)
+                    }
+                }
+            })
+            .delimited_by(just("<"), just(">"));
+
+        let body_regex = not_next(just("/>"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
+
+                match Regex::new(body) {
+                    Ok(re) => (HttpResponseBody::Regex(re), span),
                     Err(err) => {
                         let report = Report::build(ReportKind::Error, (), span.start)
                             .with_message("Invalid regex response body")
@@ -574,19 +697,21 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                             )
                             .finish();
                         emitter.emit(MyError::Report(report));
-                        None
+                        (HttpResponseBody::Invalid, span)
                     }
-                };
-            }
+                }
+            })
+            .delimited_by(just("</"), just("/>"));
 
-            if body.starts_with('(') && body.ends_with(')') {
-                let expression = &body[1..body.len() - 1];
+        let body_jq = not_next(just(")>"))
+            .validate(|body: &str, e, emitter| {
+                let span: SimpleSpan<usize> = e.span();
 
                 let mut defs = jaq_interpret::ParseCtx::new(vec![]);
                 defs.insert_natives(jaq_core::core());
                 defs.insert_defs(jaq_std::std());
 
-                let (expr, errors) = jaq_parse::parse(expression, jaq_parse::main());
+                let (expr, errors) = jaq_parse::parse(body, jaq_parse::main());
 
                 if !errors.is_empty() {
                     let labels = errors
@@ -615,107 +740,271 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                     emitter.emit(MyError::Report(report));
                 }
 
-                return expr.map(|expr| HttpResponseBody::Jq {
-                    body: expression,
-                    expr,
-                });
-            }
-
-            match base64::prelude::BASE64_STANDARD.decode(body) {
-                Ok(_) => return Some(HttpResponseBody::Base64(body)),
-                Err(_) => {
-                    let report = Report::build(ReportKind::Error, (), span.start)
-                        .with_message("Invalid base64 response body")
-                        .with_label(
-                            Label::new(span.into_range())
-                                .with_message("Invalid base64 response body")
-                                .with_color(Color::Red),
-                        )
-                        .with_note("For raw string literals, wrap the string in double quotes")
-                        .with_help(format!(
-                            "Did you mean {}{}{}{}{}?",
-                            "<".bold(),
-                            '"'.bold().green(),
-                            body.bold(),
-                            '"'.bold().green(),
-                            ">".bold()
-                        ))
-                        .finish();
-                    emitter.emit(MyError::Report(report));
-                    None
+                match expr {
+                    Some(expr) => (HttpResponseBody::Jq { body, expr }, span),
+                    None => (HttpResponseBody::Invalid, span),
                 }
-            }
-        })
-        .delimited_by(just("<"), just(">"));
+            })
+            .delimited_by(just("<("), just(")>"));
 
-    let status_code = none_of("]").repeated().to_slice()
-        .validate(|code: &str, e, emitter| {
-            match validate_http_code(code) {
-                Ok(code) => Some(code),
-                Err(Some((suggested_code, suggested_name))) => {
+        choice((body_json, body_text, body_regex, body_jq, body_base64))
+    });
+
+    let http = choice((
+        header.map(|h| HttpRequest::Header(h)),
+        http_verb.map(|v| HttpRequest::Verb(v)),
+        request_body.map(|b| HttpRequest::Body(b)),
+    ))
+    .repeated()
+    .collect::<Vec<_>>()
+    .then(url)
+    .validate(|(request, url), e, emitter| {
+        let verb = {
+            let verbs = request
+                .iter()
+                .filter_map(|r| match r {
+                    HttpRequest::Verb(v) => match v.0 {
+                        HttpVerb::Invalid => None,
+                        _ => Some(v),
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            if verbs.len() > 1 {
+                let span: SimpleSpan<usize> = e.span();
+                let report = Report::build(ReportKind::Error, (), span.start)
+                    .with_message("Multiple HTTP verbs")
+                    .with_labels(
+                        verbs
+                            .iter()
+                            .map(|verb| {
+                                Label::new(verb.1.into_range())
+                                    .with_message(format!(
+                                        "Specified HTTP verb {} here",
+                                        verb.0.bold()
+                                    ))
+                                    .with_color(Color::Red)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .finish();
+                emitter.emit(MyError::Report(report));
+            }
+
+            verbs.first().map(|v| v.0.clone())
+        };
+
+        let body = {
+            let bodies = request
+                .iter()
+                .filter_map(|r| match r {
+                    HttpRequest::Body(b) => match b.0 {
+                        HttpRequestBody::Invalid => None,
+                        _ => Some(b),
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            if bodies.len() > 1 {
+                let span: SimpleSpan<usize> = e.span();
+                let report = Report::build(ReportKind::Error, (), span.start)
+                    .with_message("Multiple request bodies")
+                    .with_labels(
+                        bodies
+                            .iter()
+                            .map(|body| {
+                                let body_span = match body.0 {
+                                    HttpRequestBody::Json(_) => "JSON",
+                                    HttpRequestBody::Text(_) => "text",
+                                    HttpRequestBody::Base64(_) => "base64",
+                                    _ => "invalid",
+                                };
+
+                                Label::new(body.1.into_range())
+                                    .with_message(format!(
+                                        "Specified {} request body here",
+                                        body_span
+                                    ))
+                                    .with_color(Color::Red)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .finish();
+                emitter.emit(MyError::Report(report));
+            }
+
+            bodies.first().map(|b| b.0.clone())
+        };
+
+        let headers = request
+            .into_iter()
+            .filter_map(|r| match r {
+                HttpRequest::Header(h) => Some(h),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        (headers, verb, body, url)
+    })
+    .then(
+        choice((
+            header.map(|h| HttpResponse::Header(h)),
+            timeout.map(|t| HttpResponse::Timeout(t)),
+            status_code.map(|c| HttpResponse::StatusCode(c)),
+            response_body.map(|b| HttpResponse::Body(b)),
+        ))
+        .repeated()
+        .collect::<Vec<_>>()
+        .validate(|request, e, emitter| {
+            let timeout = {
+                let timeouts = request
+                    .iter()
+                    .filter_map(|r| match r {
+                        HttpResponse::Timeout(t) => match t.0 {
+                            Some(d) => Some((d, t.1)),
+                            None => None,
+                        },
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                if timeouts.len() > 1 {
                     let span: SimpleSpan<usize> = e.span();
                     let report = Report::build(ReportKind::Error, (), span.start)
-                        .with_message("Invalid HTTP status code")
-                        .with_label(
-                            Label::new(span.into_range())
-                                .with_message(format!("Invalid HTTP status code {}", code.bold()))
-                                .with_color(Color::Red),
+                        .with_message("Multiple timeouts")
+                        .with_labels(
+                            timeouts
+                                .iter()
+                                .enumerate()
+                                .map(|(i, timeout)| {
+                                    Label::new(timeout.1.into_range())
+                                        .with_message(format!(
+                                            "Specified timeout {} here",
+                                            (i + 1).italic()
+                                        ))
+                                        .with_color(Color::Red)
+                                })
+                                .collect::<Vec<_>>(),
                         )
-                        .with_help(format!(
-                            "Did you mean {} ({})?",
-                            suggested_name.bold(),
-                            suggested_code.bold()
-                        ))
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    None
                 }
-                Err(None) => {
+
+                timeouts.first().map(|t| t.0)
+            };
+
+            let status_code = {
+                let status_codes = request
+                    .iter()
+                    .filter_map(|r| match r {
+                        HttpResponse::StatusCode(c) => match c.0 {
+                            Some(d) => Some((d, c.1)),
+                            None => None,
+                        },
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                if status_codes.len() > 1 {
                     let span: SimpleSpan<usize> = e.span();
                     let report = Report::build(ReportKind::Error, (), span.start)
-                        .with_message("Invalid HTTP status code")
-                        .with_label(
-                            Label::new(span.into_range())
-                                .with_message(format!("Invalid HTTP status code {}", code.bold()))
-                                .with_color(Color::Red),
+                        .with_message("Multiple status codes")
+                        .with_labels(
+                            status_codes
+                                .iter()
+                                .enumerate()
+                                .map(|(i, status_code)| {
+                                    Label::new(status_code.1.into_range())
+                                        .with_message(format!(
+                                            "Specified status code {} here",
+                                            (i + 1).italic()
+                                        ))
+                                        .with_color(Color::Red)
+                                })
+                                .collect::<Vec<_>>(),
                         )
-                        .with_note("See https://developer.mozilla.org/en-US/docs/Web/HTTP/Status for available status codes")
                         .finish();
                     emitter.emit(MyError::Report(report));
-                    None
                 }
-            }
-        })
-        .delimited_by(just("["), just("]"));
 
-    let http = headers
-        .then(http_verb.repeated().at_most(1).collect::<Vec<_>>())
-        .then(request_body.repeated().at_most(1).collect::<Vec<_>>())
-        .then(url)
-        .then(timeout.repeated().at_most(1).collect::<Vec<_>>())
-        .then(status_code.repeated().at_most(1).collect::<Vec<_>>())
-        .then(response_body.repeated().at_most(1).collect::<Vec<_>>())
-        .then(headers)
-        .map(
-            |(
-                (
-                    (((((request_headers, verb), request_body), url), timeout), status_code),
-                    response_body,
-                ),
+                status_codes.first().map(|c| c.0)
+            };
+
+            let response_body = {
+                let bodies = request
+                    .iter()
+                    .filter_map(|r| match r {
+                        HttpResponse::Body(b) => match b.0 {
+                            HttpResponseBody::Invalid => None,
+                            _ => Some(b),
+                        },
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                if bodies.len() > 1 {
+                    let span: SimpleSpan<usize> = e.span();
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Multiple response bodies")
+                        .with_labels(
+                            bodies
+                                .iter()
+                                .map(|body| {
+                                    let body_span = match body.0 {
+                                        HttpResponseBody::Json(_) => "JSON",
+                                        HttpResponseBody::Text(_) => "text",
+                                        HttpResponseBody::Base64(_) => "base64",
+                                        HttpResponseBody::Regex(_) => "regex",
+                                        HttpResponseBody::Jq { .. } => "jq",
+                                        _ => "invalid",
+                                    };
+
+                                    Label::new(body.1.into_range())
+                                        .with_message(format!(
+                                            "Specified {} response body here",
+                                            body_span
+                                        ))
+                                        .with_color(Color::Red)
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                }
+
+                bodies.first().map(|b| b.0.clone())
+            };
+
+            let headers = request
+                .into_iter()
+                .filter_map(|r| match r {
+                    HttpResponse::Header(h) => Some(h),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            (headers, timeout, status_code, response_body)
+        }),
+    )
+    .map(
+        |(
+            (request_headers, verb, request_body, url),
+            (response_headers, timeout, status_code, response_body),
+        )| {
+            Http {
+                request_headers,
+                verb,
+                request_body,
+                url,
+                timeout,
                 response_headers,
-            )| {
-                Http {
-                    request_headers,
-                    verb: verb.first().cloned().flatten(),
-                    request_body: request_body.first().cloned().flatten(),
-                    url,
-                    timeout: timeout.first().copied().flatten(),
-                    status_code: status_code.first().cloned().flatten(),
-                    response_body: response_body.first().cloned().flatten(),
-                    response_headers,
-                }
-            },
-        );
+                status_code,
+                response_body,
+            }
+        },
+    );
 
     let tcp_url = just("tcp://")
         .ignore_then(none_of(")").repeated().to_slice())
@@ -723,10 +1012,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
 
     let tcp = tcp_url
         .then(timeout.repeated().at_most(1).collect::<Vec<_>>())
-        .map(|(uri, timeout)| Tcp {
-            uri,
-            timeout: timeout.first().copied().flatten(),
-        });
+        .map(|(uri, timeout)| Tcp { uri, timeout: None });
 
     tcp.map(|t| Expr::Tcp(t)).or(http.map(|h| Expr::Http(h)))
 }
