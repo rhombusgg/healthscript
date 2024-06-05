@@ -116,8 +116,20 @@ pub enum Body<'a> {
 impl Display for Body<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Body::Json(value) => write!(f, "<{}>", value)?,
-            Body::Text(text) => write!(f, r#"<"{}">"#, text)?,
+            Body::Json(value) => {
+                let json_string = serde_json::to_string(value).unwrap();
+                let hashes = largest_escape_sequence(json_string.as_str(), '}');
+                let hashes_string = "#".repeat(hashes + 1);
+
+                write!(f, "<{}{}{}>", hashes_string, value, hashes_string)?
+            }
+            Body::Text(text) => {
+                let text = escape_string(text);
+                let hashes = largest_escape_sequence(text.as_str(), '"');
+                let hashes_string = "#".repeat(hashes + 1);
+
+                write!(f, r#"<{}"{}"{}>"#, hashes_string, text, hashes_string)?
+            }
             Body::Base64(base64) => write!(f, "<{}>", base64)?,
             Body::Jq { body, expr: _ } => write!(f, "<({})>", body)?,
             Body::Regex(r) => write!(f, "</{}/>", r)?,
@@ -412,6 +424,52 @@ fn unescape_c_style(input: &str) -> String {
     }
 
     result
+}
+
+fn escape_string(input: &str) -> String {
+    let mut result = String::new();
+
+    for c in input.chars() {
+        match c {
+            '\n' => result.push_str("\\n"),
+            '\t' => result.push_str("\\t"),
+            '\r' => result.push_str("\\r"),
+            '\\' => result.push_str("\\\\"),
+            '\'' => result.push_str("\\'"),
+            '\0' => result.push_str("\\0"),
+            _ => result.push(c),
+        }
+    }
+
+    result
+}
+
+fn largest_escape_sequence(input: &str, delimiter: char) -> usize {
+    let mut max_hashes = 0;
+    let mut current_hashes = 0;
+    let mut in_sequence = false;
+
+    for c in input.chars() {
+        match c {
+            '#' if in_sequence => current_hashes += 1,
+            '>' if in_sequence => {
+                if current_hashes > max_hashes {
+                    max_hashes = current_hashes;
+                }
+                in_sequence = false;
+            }
+            _ => {
+                if c == delimiter {
+                    current_hashes = 0;
+                    in_sequence = true;
+                } else {
+                    in_sequence = false;
+                }
+            }
+        }
+    }
+
+    max_hashes
 }
 
 impl<'a> chumsky::error::Error<'a, &'a str> for MyError<'a> {
