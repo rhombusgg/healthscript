@@ -12,7 +12,7 @@ use yansi::Paint;
 pub type Span = SimpleSpan<usize>;
 pub type Spanned<T> = (T, Span);
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Expr<'a> {
     Http(Http<'a>),
     Tcp(Tcp<'a>),
@@ -35,7 +35,7 @@ impl Display for Expr<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Http<'a> {
     request_headers: Vec<(&'a str, &'a str)>,
     verb: Option<HttpVerb>,
@@ -47,14 +47,14 @@ pub struct Http<'a> {
     response_body: Option<Body<'a>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum HttpRequest<'a> {
     Header((&'a str, &'a str)),
     Verb(Spanned<HttpVerb>),
     Body(Spanned<Body<'a>>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum HttpResponse<'a> {
     Timeout(Spanned<Option<u64>>),
     StatusCode(Spanned<Option<u16>>),
@@ -62,7 +62,7 @@ enum HttpResponse<'a> {
     Header((&'a str, &'a str)),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum TcpResponse<'a> {
     Timeout(Spanned<Option<u64>>),
     Body(Spanned<Body<'a>>),
@@ -162,7 +162,7 @@ impl Display for HttpVerb {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Tcp<'a> {
     uri: &'a str,
     timeout: Option<u64>,
@@ -185,12 +185,12 @@ impl Display for Tcp<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Ping<'a> {
     uri: &'a str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Dns<'a> {
     uri: &'a str,
     server: &'a str,
@@ -888,7 +888,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 emitter.emit(MyError::Report(report));
             }
 
-            bodies.first().map(|b| b.0.clone())
+            bodies.first().map(|(b, _)| b.clone())
         };
 
         let headers = request
@@ -1027,7 +1027,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                     emitter.emit(MyError::Report(report));
                 }
 
-                bodies.first().map(|b| b.0.clone())
+                bodies.first().map(|(b, _)| b.clone())
             };
 
             let headers = request
@@ -1152,7 +1152,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                     emitter.emit(MyError::Report(report));
                 }
 
-                bodies.first().map(|b| b.0.clone())
+                bodies.first().map(|(b, _)| b.clone())
             };
 
             (uri, timeout, response_body)
