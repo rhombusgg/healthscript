@@ -12,13 +12,14 @@ use yansi::Paint;
 pub type Span = SimpleSpan<usize>;
 pub type Spanned<T> = (T, Span);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr<'a> {
     Http(Http<'a>),
     Tcp(Tcp<'a>),
     Ping(Ping<'a>),
     Dns(Dns<'a>),
     Invalid,
+    And(Box<Expr<'a>>, Box<Expr<'a>>),
 }
 
 impl Display for Expr<'_> {
@@ -29,41 +30,42 @@ impl Display for Expr<'_> {
             Expr::Ping(ping) => write!(f, "{}", ping.uri),
             Expr::Dns(dns) => write!(f, "{}", dns.uri),
             Expr::Invalid => write!(f, "Invalid"),
+            Expr::And(lhs, rhs) => write!(f, "{} and {}", lhs, rhs),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Http<'a> {
     request_headers: Vec<(&'a str, &'a str)>,
     verb: Option<HttpVerb>,
-    request_body: Option<HttpRequestBody<'a>>,
+    request_body: Option<Body<'a>>,
     url: &'a str,
     timeout: Option<u64>,
     status_code: Option<u16>,
     response_headers: Vec<(&'a str, &'a str)>,
-    response_body: Option<HttpResponseBody<'a>>,
+    response_body: Option<Body<'a>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum HttpRequest<'a> {
     Header((&'a str, &'a str)),
     Verb(Spanned<HttpVerb>),
-    Body(Spanned<HttpRequestBody<'a>>),
+    Body(Spanned<Body<'a>>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum HttpResponse<'a> {
     Timeout(Spanned<Option<u64>>),
     StatusCode(Spanned<Option<u16>>),
-    Body(Spanned<HttpResponseBody<'a>>),
+    Body(Spanned<Body<'a>>),
     Header((&'a str, &'a str)),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum TcpResponse<'a> {
     Timeout(Spanned<Option<u64>>),
-    Body(Spanned<TcpResponseBody<'a>>),
+    Body(Spanned<Body<'a>>),
 }
 
 impl Display for Http<'_> {
@@ -101,68 +103,25 @@ impl Display for Http<'_> {
         Ok(())
     }
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HttpRequestBody<'a> {
-    Json(Value),
-    Text(&'a str),
-    Base64(&'a str),
-    Invalid,
-}
-
-impl Display for HttpRequestBody<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HttpRequestBody::Json(value) => write!(f, "<{}>", value)?,
-            HttpRequestBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
-            HttpRequestBody::Base64(base64) => write!(f, "<{}>", base64)?,
-            HttpRequestBody::Invalid => write!(f, "")?,
-        }
-
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug)]
-pub enum HttpResponseBody<'a> {
+pub enum Body<'a> {
     Json(Value),
-    Text(&'a str),
+    Text(String),
     Base64(&'a str),
     Jq { body: &'a str, expr: jaq_syn::Main },
     Regex(Regex),
     Invalid,
 }
 
-impl Display for HttpResponseBody<'_> {
+impl Display for Body<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HttpResponseBody::Json(value) => write!(f, "<{}>", value)?,
-            HttpResponseBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
-            HttpResponseBody::Base64(base64) => write!(f, "<{}>", base64)?,
-            HttpResponseBody::Jq { body, expr: _ } => write!(f, "<({})>", body)?,
-            HttpResponseBody::Regex(r) => write!(f, "<{}>", r)?,
-            HttpResponseBody::Invalid => write!(f, "")?,
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum TcpResponseBody<'a> {
-    Text(&'a str),
-    Base64(&'a str),
-    Regex(Regex),
-    Invalid,
-}
-
-impl Display for TcpResponseBody<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TcpResponseBody::Text(text) => write!(f, r#"<"{}">"#, text)?,
-            TcpResponseBody::Base64(base64) => write!(f, "<{}>", base64)?,
-            TcpResponseBody::Regex(r) => write!(f, "<{}>", r)?,
-            TcpResponseBody::Invalid => write!(f, "")?,
+            Body::Json(value) => write!(f, "<{}>", value)?,
+            Body::Text(text) => write!(f, r#"<"{}">"#, text)?,
+            Body::Base64(base64) => write!(f, "<{}>", base64)?,
+            Body::Jq { body, expr: _ } => write!(f, "<({})>", body)?,
+            Body::Regex(r) => write!(f, "</{}/>", r)?,
+            Body::Invalid => write!(f, "")?,
         }
 
         Ok(())
@@ -191,11 +150,11 @@ impl Display for HttpVerb {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tcp<'a> {
     uri: &'a str,
     timeout: Option<u64>,
-    response_body: Option<TcpResponseBody<'a>>,
+    response_body: Option<Body<'a>>,
 }
 
 impl Display for Tcp<'_> {
@@ -214,12 +173,12 @@ impl Display for Tcp<'_> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ping<'a> {
     uri: &'a str,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dns<'a> {
     uri: &'a str,
     server: &'a str,
@@ -404,6 +363,57 @@ enum MyError<'a> {
     Report(Report<'a, Range<usize>>),
 }
 
+fn unescape_c_style(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next_c) = chars.peek() {
+                match next_c {
+                    'n' => {
+                        result.push('\n');
+                        chars.next();
+                    }
+                    't' => {
+                        result.push('\t');
+                        chars.next();
+                    }
+                    'r' => {
+                        result.push('\r');
+                        chars.next();
+                    }
+                    '\\' => {
+                        result.push('\\');
+                        chars.next();
+                    }
+                    '"' => {
+                        result.push('"');
+                        chars.next();
+                    }
+                    '\'' => {
+                        result.push('\'');
+                        chars.next();
+                    }
+                    '0' => {
+                        result.push('\0');
+                        chars.next();
+                    }
+                    _ => {
+                        result.push(c);
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 impl<'a> chumsky::error::Error<'a, &'a str> for MyError<'a> {
     fn expected_found<E: IntoIterator<Item = Option<MaybeRef<'a, char>>>>(
         expected: E,
@@ -419,7 +429,26 @@ impl<'a> chumsky::error::Error<'a, &'a str> for MyError<'a> {
     }
 }
 
-fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
+// fn rparser<'a>() -> impl Parser<'a, &'a str, Spanned<HttpRequestBody<'a>>, extra::Err<MyError<'a>>>
+// {
+//     let hashes = just("#").repeated();
+//     let start = hashes.count().then_ignore(just("\""));
+//     let end = just("\"").then(hashes.configure(|cfg, ctx| cfg.exactly(*ctx)));
+//     let inner = any().and_is(end.not()).repeated().to_slice();
+//     let raw_string = start.then_with_ctx(inner.then_ignore(end));
+
+//     let request_body = raw_string
+//         .validate(|body: &str, e, _emitter| {
+//             let span: SimpleSpan<usize> = e.span();
+//             // let body = unescape_c_style(&body);
+//             (HttpRequestBody::Text(body.to_string()), span)
+//         })
+//         .delimited_by(just("<"), just(">"));
+
+//     request_body
+// }
+
+fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (), usize>> {
     let header = just("[")
         .ignore_then(text::ident())
         .then_ignore(just(":").then(whitespace()))
@@ -504,91 +533,101 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         })
         .delimited_by(just("("), just(")"));
 
-    let request_body = recursive(|request_body| {
-        let not_next = |end_delimiter: chumsky::primitive::Just<_, _, _>| {
-            any()
-                .and_is(end_delimiter.then(end()).not())
-                .and_is(end_delimiter.then(url).not())
-                .and_is(end_delimiter.then(header).not())
-                .and_is(end_delimiter.then(http_verb).not())
-                .and_is(end_delimiter.then(request_body.clone()).not())
-                .repeated()
-                .to_slice()
+    let hashes = just('#').repeated();
+    let start = hashes.count().then_ignore(just('{'));
+    let end = just('}')
+        .then(hashes.configure(|cfg, ctx| cfg.exactly(*ctx)))
+        .then(just(">"));
+    let inner = any().and_is(end.not()).repeated().to_slice();
+    let raw_json = just("<").ignore_then(start.ignore_with_ctx(inner.then_ignore(end)));
+    let body_json = raw_json.validate(|body: &str, e, emitter| {
+        let span: SimpleSpan<usize> = e.span();
+
+        match serde_json::from_str(format!("{{{}}}", body).as_str()) {
+            Ok(value) => (Body::Json(value), span),
+            Err(err) => {
+                let column = err.column();
+                let json_span = SimpleSpan::new(span.start + column - 2, span.start + column - 2);
+
+                let report = Report::build(ReportKind::Error, (), json_span.start)
+                    .with_message("Invalid JSON body")
+                    .with_label(
+                        Label::new(json_span.into_range())
+                            .with_message(err.to_string())
+                            .with_color(Color::Yellow),
+                    )
+                    .with_label(
+                        Label::new(span.into_range())
+                            .with_message("Invalid JSON body")
+                            .with_color(Color::Red),
+                    )
+                    .finish();
+                emitter.emit(MyError::Report(report));
+
+                (Body::Invalid, span)
+            }
+        }
+    });
+
+    let hashes = just('#').repeated();
+    let start = hashes.count().then_ignore(just('"'));
+    let end = just('"')
+        .then(hashes.configure(|cfg, ctx| cfg.exactly(*ctx)))
+        .then(just(">"));
+    let inner = any().and_is(end.not()).repeated().to_slice();
+    let raw_string = just("<").ignore_then(
+        just('r')
+            .repeated()
+            .at_most(1)
+            .to_slice()
+            .then(start.ignore_with_ctx(inner.then_ignore(end))),
+    );
+    let body_text = raw_string.validate(|(raw, body): (&str, &str), e, _emitter| {
+        let span: SimpleSpan<usize> = e.span();
+
+        let body = if raw.is_empty() {
+            unescape_c_style(&body)
+        } else {
+            body.to_owned()
         };
 
-        let body_json = not_next(just("}>"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match serde_json::from_str(format!("{{{}}}", body).as_str()) {
-                    Ok(value) => (HttpRequestBody::Json(value), span),
-                    Err(err) => {
-                        let column = err.column();
-                        let json_span =
-                            SimpleSpan::new(span.start + column - 2, span.start + column - 2);
-
-                        let report = Report::build(ReportKind::Error, (), json_span.start)
-                            .with_message("Invalid JSON request body")
-                            .with_label(
-                                Label::new(json_span.into_range())
-                                    .with_message(err.to_string())
-                                    .with_color(Color::Yellow),
-                            )
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message("Invalid JSON request body")
-                                    .with_color(Color::Red),
-                            )
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-
-                        (HttpRequestBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("<{"), just("}>"));
-
-        let body_text = not_next(just("\">"))
-            .validate(|body: &str, e, _emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                (HttpRequestBody::Text(body), span)
-            })
-            .delimited_by(just("<\""), just("\">"));
-
-        let body_base64 = not_next(just(">"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match base64::prelude::BASE64_STANDARD.decode(body) {
-                    Ok(_) => (HttpRequestBody::Base64(body), span),
-                    Err(_) => {
-                        let report = Report::build(ReportKind::Error, (), span.start)
-                            .with_message("Invalid base64 request body")
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message("Invalid base64 request body")
-                                    .with_color(Color::Red),
-                            )
-                            .with_note("For raw string literals, wrap the string in double quotes")
-                            .with_help(format!(
-                                "Did you mean {}{}{}{}{}?",
-                                "<".bold(),
-                                '"'.bold().green(),
-                                body.bold(),
-                                '"'.bold().green(),
-                                ">".bold()
-                            ))
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-                        (HttpRequestBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("<"), just(">"));
-
-        choice((body_json, body_text, body_base64))
+        (Body::Text(body), span)
     });
+
+    let body_base64 = none_of(">")
+        .repeated()
+        .to_slice()
+        .validate(|body: &str, e, emitter| {
+            let span: SimpleSpan<usize> = e.span();
+
+            match base64::prelude::BASE64_STANDARD.decode(body) {
+                Ok(_) => (Body::Base64(body), span),
+                Err(_) => {
+                    let report = Report::build(ReportKind::Error, (), span.start)
+                        .with_message("Invalid base64 body")
+                        .with_label(
+                            Label::new(span.into_range())
+                                .with_message("Invalid base64 body")
+                                .with_color(Color::Red),
+                        )
+                        .with_note("For raw string literals, wrap the string in double quotes")
+                        .with_help(format!(
+                            "Did you mean {}{}{}{}{}?",
+                            "<".bold(),
+                            '"'.bold().green(),
+                            body.bold(),
+                            '"'.bold().green(),
+                            ">".bold()
+                        ))
+                        .finish();
+                    emitter.emit(MyError::Report(report));
+                    (Body::Invalid, span)
+                }
+            }
+        })
+        .delimited_by(just("<"), just(">"));
+
+    let request_body = choice((body_json, body_text, body_base64));
 
     let status_code = none_of("]").repeated().to_slice()
         .validate(|code: &str, e, emitter| {
@@ -630,156 +669,81 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         })
         .delimited_by(just("["), just("]"));
 
-    let response_body = recursive(|response_body| {
-        let not_next = |end_delimiter: chumsky::primitive::Just<_, _, _>| {
-            any()
-                .and_is(end_delimiter.then(end()).not())
-                .and_is(end_delimiter.then(header).not())
-                .and_is(end_delimiter.then(status_code).not())
-                .and_is(end_delimiter.then(response_body.clone()).not())
-                .repeated()
-                .to_slice()
-        };
+    let hashes = just('#').repeated();
+    let start = hashes.count().then_ignore(just('/'));
+    let end = just('/')
+        .then(hashes.configure(|cfg, ctx| cfg.exactly(*ctx)))
+        .then(just(">"));
+    let inner = any().and_is(end.not()).repeated().to_slice();
+    let raw_regex = just("<").ignore_then(start.ignore_with_ctx(inner.then_ignore(end)));
+    let body_regex = raw_regex.validate(|body: &str, e, emitter| {
+        let span: SimpleSpan<usize> = e.span();
 
-        let body_json = not_next(just("}>"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match serde_json::from_str(format!("{{{}}}", body).as_str()) {
-                    Ok(value) => (HttpResponseBody::Json(value), span),
-                    Err(err) => {
-                        let column = err.column();
-                        let json_span =
-                            SimpleSpan::new(span.start + column - 2, span.start + column - 2);
-
-                        let report = Report::build(ReportKind::Error, (), json_span.start)
-                            .with_message("Invalid JSON response body")
-                            .with_label(
-                                Label::new(json_span.into_range())
-                                    .with_message(err.to_string())
-                                    .with_color(Color::Yellow),
-                            )
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message("Invalid JSON response body")
-                                    .with_color(Color::Red),
-                            )
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-
-                        (HttpResponseBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("<{"), just("}>"));
-
-        let body_text = not_next(just("\">"))
-            .validate(|body: &str, e, _emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                (HttpResponseBody::Text(body), span)
-            })
-            .delimited_by(just("<\""), just("\">"));
-
-        let body_base64 = not_next(just(">"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match base64::prelude::BASE64_STANDARD.decode(body) {
-                    Ok(_) => (HttpResponseBody::Base64(body), span),
-                    Err(_) => {
-                        let report = Report::build(ReportKind::Error, (), span.start)
-                            .with_message("Invalid base64 response body")
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message("Invalid base64 response body")
-                                    .with_color(Color::Red),
-                            )
-                            .with_note("For raw string literals, wrap the string in double quotes")
-                            .with_help(format!(
-                                "Did you mean {}{}{}{}{}?",
-                                "<".bold(),
-                                '"'.bold().green(),
-                                body.bold(),
-                                '"'.bold().green(),
-                                ">".bold()
-                            ))
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-                        (HttpResponseBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("<"), just(">"));
-
-        let body_regex = not_next(just("/>"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match Regex::new(body) {
-                    Ok(re) => (HttpResponseBody::Regex(re), span),
-                    Err(err) => {
-                        let report = Report::build(ReportKind::Error, (), span.start)
-                            .with_message("Invalid regex response body")
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message(err.to_string())
-                                    .with_color(Color::Red),
-                            )
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-                        (HttpResponseBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("</"), just("/>"));
-
-        let body_jq = not_next(just(")>"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                let mut defs = jaq_interpret::ParseCtx::new(vec![]);
-                defs.insert_natives(jaq_core::core());
-                defs.insert_defs(jaq_std::std());
-
-                let (expr, errors) = jaq_parse::parse(body, jaq_parse::main());
-
-                if !errors.is_empty() {
-                    let labels = errors
-                        .iter()
-                        .map(|e| {
-                            let jq_span = e.span();
-                            let jq_span = SimpleSpan::new(
-                                span.start + jq_span.start,
-                                span.start + jq_span.end,
-                            );
-
-                            Label::new(jq_span.into_range())
-                                .with_message(format!("{:#?}", e.reason()))
-                                .with_color(Color::Yellow)
-                        })
-                        .collect::<Vec<_>>();
-                    let report = Report::build(ReportKind::Error, (), span.start)
-                        .with_message("Invalid jq expression")
-                        .with_label(
-                            Label::new(span.into_range())
-                                .with_message("Invalid jq expression")
-                                .with_color(Color::Red),
-                        )
-                        .with_labels(labels)
-                        .finish();
-                    emitter.emit(MyError::Report(report));
-                }
-
-                match expr {
-                    Some(expr) => (HttpResponseBody::Jq { body, expr }, span),
-                    None => (HttpResponseBody::Invalid, span),
-                }
-            })
-            .delimited_by(just("<("), just(")>"));
-
-        choice((body_json, body_text, body_regex, body_jq, body_base64))
+        match Regex::new(body) {
+            Ok(re) => (Body::Regex(re), span),
+            Err(err) => {
+                let report = Report::build(ReportKind::Error, (), span.start)
+                    .with_message("Invalid regex response body")
+                    .with_label(
+                        Label::new(span.into_range())
+                            .with_message(err.to_string())
+                            .with_color(Color::Red),
+                    )
+                    .finish();
+                emitter.emit(MyError::Report(report));
+                (Body::Invalid, span)
+            }
+        }
     });
+
+    let hashes = just('#').repeated();
+    let start = hashes.count().then_ignore(just('('));
+    let end = just(')')
+        .then(hashes.configure(|cfg, ctx| cfg.exactly(*ctx)))
+        .then(just(">"));
+    let inner = any().and_is(end.not()).repeated().to_slice();
+    let raw_jq = just("<").ignore_then(start.ignore_with_ctx(inner.then_ignore(end)));
+    let body_jq = raw_jq.validate(|body: &str, e, emitter| {
+        let span: SimpleSpan<usize> = e.span();
+
+        let mut defs = jaq_interpret::ParseCtx::new(vec![]);
+        defs.insert_natives(jaq_core::core());
+        defs.insert_defs(jaq_std::std());
+
+        let (expr, errors) = jaq_parse::parse(body, jaq_parse::main());
+
+        if !errors.is_empty() {
+            let labels = errors
+                .iter()
+                .map(|e| {
+                    let jq_span = e.span();
+                    let jq_span =
+                        SimpleSpan::new(span.start + jq_span.start, span.start + jq_span.end);
+
+                    Label::new(jq_span.into_range())
+                        .with_message(format!("{:#?}", e.reason()))
+                        .with_color(Color::Yellow)
+                })
+                .collect::<Vec<_>>();
+            let report = Report::build(ReportKind::Error, (), span.start)
+                .with_message("Invalid jq expression")
+                .with_label(
+                    Label::new(span.into_range())
+                        .with_message("Invalid jq expression")
+                        .with_color(Color::Red),
+                )
+                .with_labels(labels)
+                .finish();
+            emitter.emit(MyError::Report(report));
+        }
+
+        match expr {
+            Some(expr) => (Body::Jq { body, expr }, span),
+            None => (Body::Invalid, span),
+        }
+    });
+
+    let response_body = choice((body_json, body_text, body_regex, body_jq, body_base64));
 
     let http = choice((
         header.map(|h| HttpRequest::Header(h)),
@@ -831,7 +795,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                 .iter()
                 .filter_map(|r| match r {
                     HttpRequest::Body(b) => match b.0 {
-                        HttpRequestBody::Invalid => None,
+                        Body::Invalid => None,
                         _ => Some(b),
                     },
                     _ => None,
@@ -847,9 +811,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                             .iter()
                             .map(|body| {
                                 let body_span = match body.0 {
-                                    HttpRequestBody::Json(_) => "JSON",
-                                    HttpRequestBody::Text(_) => "text",
-                                    HttpRequestBody::Base64(_) => "base64",
+                                    Body::Json(_) => "JSON",
+                                    Body::Text(_) => "text",
+                                    Body::Base64(_) => "base64",
                                     _ => "invalid",
                                 };
 
@@ -968,7 +932,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                     .iter()
                     .filter_map(|r| match r {
                         HttpResponse::Body(b) => match b.0 {
-                            HttpResponseBody::Invalid => None,
+                            Body::Invalid => None,
                             _ => Some(b),
                         },
                         _ => None,
@@ -984,11 +948,11 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                                 .iter()
                                 .map(|body| {
                                     let body_span = match body.0 {
-                                        HttpResponseBody::Json(_) => "JSON",
-                                        HttpResponseBody::Text(_) => "text",
-                                        HttpResponseBody::Base64(_) => "base64",
-                                        HttpResponseBody::Regex(_) => "regex",
-                                        HttpResponseBody::Jq { .. } => "jq",
+                                        Body::Json(_) => "JSON",
+                                        Body::Text(_) => "text",
+                                        Body::Base64(_) => "base64",
+                                        Body::Regex(_) => "regex",
+                                        Body::Jq { .. } => "jq",
                                         _ => "invalid",
                                     };
 
@@ -1037,80 +1001,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
         },
     );
 
-    let tcp_response_body = recursive(|response_body| {
-        let not_next = |end_delimiter: chumsky::primitive::Just<_, _, _>| {
-            any()
-                .and_is(end_delimiter.then(end()).not())
-                .and_is(end_delimiter.then(header).not())
-                .and_is(end_delimiter.then(status_code).not())
-                .and_is(end_delimiter.then(response_body.clone()).not())
-                .repeated()
-                .to_slice()
-        };
-
-        let body_text = not_next(just("\">"))
-            .validate(|body: &str, e, _emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                (TcpResponseBody::Text(body), span)
-            })
-            .delimited_by(just("<\""), just("\">"));
-
-        let body_base64 = not_next(just(">"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match base64::prelude::BASE64_STANDARD.decode(body) {
-                    Ok(_) => (TcpResponseBody::Base64(body), span),
-                    Err(_) => {
-                        let report = Report::build(ReportKind::Error, (), span.start)
-                            .with_message("Invalid base64 response body")
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message("Invalid base64 response body")
-                                    .with_color(Color::Red),
-                            )
-                            .with_note("For raw string literals, wrap the string in double quotes")
-                            .with_help(format!(
-                                "Did you mean {}{}{}{}{}?",
-                                "<".bold(),
-                                '"'.bold().green(),
-                                body.bold(),
-                                '"'.bold().green(),
-                                ">".bold()
-                            ))
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-                        (TcpResponseBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("<"), just(">"));
-
-        let body_regex = not_next(just("/>"))
-            .validate(|body: &str, e, emitter| {
-                let span: SimpleSpan<usize> = e.span();
-
-                match Regex::new(body) {
-                    Ok(re) => (TcpResponseBody::Regex(re), span),
-                    Err(err) => {
-                        let report = Report::build(ReportKind::Error, (), span.start)
-                            .with_message("Invalid regex response body")
-                            .with_label(
-                                Label::new(span.into_range())
-                                    .with_message(err.to_string())
-                                    .with_color(Color::Red),
-                            )
-                            .finish();
-                        emitter.emit(MyError::Report(report));
-                        (TcpResponseBody::Invalid, span)
-                    }
-                }
-            })
-            .delimited_by(just("</"), just("/>"));
-
-        choice((body_text, body_regex, body_base64))
-    });
+    let tcp_response_body = choice((body_text, body_regex, body_base64));
 
     let tcp_url = just("tcp://")
         .ignore_then(none_of(")").repeated().to_slice())
@@ -1168,7 +1059,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                     .iter()
                     .filter_map(|r| match r {
                         TcpResponse::Body(b) => match b.0 {
-                            TcpResponseBody::Invalid => None,
+                            Body::Invalid => None,
                             _ => Some(b),
                         },
                         _ => None,
@@ -1184,9 +1075,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
                                 .iter()
                                 .map(|body| {
                                     let body_span = match body.0 {
-                                        TcpResponseBody::Text(_) => "text",
-                                        TcpResponseBody::Base64(_) => "base64",
-                                        TcpResponseBody::Regex(_) => "regex",
+                                        Body::Text(_) => "text",
+                                        Body::Base64(_) => "base64",
+                                        Body::Regex(_) => "regex",
                                         _ => "invalid",
                                     };
 
@@ -1214,7 +1105,19 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Err<MyError<'a>>> {
             response_body,
         });
 
-    tcp.map(|t| Expr::Tcp(t)).or(http.map(|h| Expr::Http(h)))
+    // let single_expression = tcp.map(|t| Expr::Tcp(t)).or(http.map(|h| Expr::Http(h)));
+    let single_expression = choice((tcp.map(|t| Expr::Tcp(t)), (http.map(|h| Expr::Http(h)))));
+
+    recursive(|expr| {
+        choice((
+            single_expression
+                .clone()
+                .then_ignore(just(" and "))
+                .then(expr.clone())
+                .map(|(a, b)| Expr::And(Box::new(a), Box::new(b))),
+            single_expression,
+        ))
+    })
 }
 
 pub fn parse(input: &str) -> (Option<Expr>, Vec<String>) {
