@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 ariadne = "0.4.1"
+async-recursion = "1.1.1"
 base64 = "0.22.1"
 chumsky = { version = "1.0.0-alpha.7", features = ["label"] }
 jaq-core = "1.4.0"
@@ -16,11 +17,13 @@ jaq-std = "1.4.0"
 jaq-syn = "1.1.0"
 regex = "1.10.4"
 reqwest = { version = "0.12.4", default-features = false, features = [
+    "blocking",
     "json",
     "rustls-tls",
 ] }
 serde_json = "1.0.117"
 strsim = "0.11.1"
+tracing = "0.1.40"
 yansi = "1.0.1"
 
 [dev-dependencies]

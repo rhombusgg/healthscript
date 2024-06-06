@@ -52,6 +52,34 @@ fn http_verb() {
 }
 
 #[test]
+fn http_verb_status_code() {
+    let input = r#"[GET](https://example.com)[404]"#;
+    let (ast, _errors) = parse(input);
+
+    let expected = expect![[r#"
+        Some(
+            Http(
+                Http {
+                    request_headers: [],
+                    verb: Some(
+                        Get,
+                    ),
+                    request_body: None,
+                    url: "https://example.com",
+                    timeout: None,
+                    status_code: Some(
+                        404,
+                    ),
+                    response_headers: [],
+                    response_body: None,
+                },
+            ),
+        )
+    "#]];
+    expected.assert_debug_eq(&ast);
+}
+
+#[test]
 fn response_body_regex() {
     let input = r#"(https://example.com)</hi/>"#;
     let (ast, _errors) = parse(input);
@@ -68,11 +96,7 @@ fn response_body_regex() {
                     status_code: None,
                     response_headers: [],
                     response_body: Some(
-                        Regex(
-                            Regex(
-                                "hi",
-                            ),
-                        ),
+                        Regex(hi),
                     ),
                 },
             ),
@@ -98,55 +122,7 @@ fn response_body_jq() {
                     status_code: None,
                     response_headers: [],
                     response_body: Some(
-                        Jq {
-                            body: ".x == 3",
-                            expr: Main {
-                                defs: [],
-                                body: (
-                                    Binary(
-                                        (
-                                            Path(
-                                                (
-                                                    Id,
-                                                    0..1,
-                                                ),
-                                                [
-                                                    (
-                                                        Index(
-                                                            (
-                                                                Str(
-                                                                    Str {
-                                                                        fmt: None,
-                                                                        parts: [
-                                                                            Str(
-                                                                                "x",
-                                                                            ),
-                                                                        ],
-                                                                    },
-                                                                ),
-                                                                1..3,
-                                                            ),
-                                                        ),
-                                                        Essential,
-                                                    ),
-                                                ],
-                                            ),
-                                            0..3,
-                                        ),
-                                        Ord(
-                                            Eq,
-                                        ),
-                                        (
-                                            Num(
-                                                "3",
-                                            ),
-                                            6..7,
-                                        ),
-                                    ),
-                                    0..7,
-                                ),
-                            },
-                        },
+                        Jq(.x == 3),
                     ),
                 },
             ),

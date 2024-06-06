@@ -10,6 +10,8 @@ struct Args {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let args = Args::parse();
 
     let (ast, errors) = healthscript::parse(&args.script);
@@ -25,5 +27,7 @@ fn main() {
     println!("{:#?}", ast);
     if let Some(ast) = ast {
         println!("{}", ast);
+        let result = ast.execute_blocking();
+        println!("{:#?}", result);
     }
 }

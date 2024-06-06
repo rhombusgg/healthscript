@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
 healthscript = { path = "../healthscript" }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"

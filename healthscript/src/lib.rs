@@ -1,9 +1,11 @@
-use std::{fmt::Display, ops::Range};
+use std::{fmt::Display, ops::Range, str::FromStr};
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use base64::Engine;
 use chumsky::{prelude::*, text::whitespace, util::MaybeRef};
 
+use async_recursion::async_recursion;
+use jaq_interpret::FilterT;
 use regex::Regex;
 use serde_json::Value;
 use strsim::normalized_levenshtein;
@@ -18,8 +20,51 @@ pub enum Expr<'a> {
     Tcp(Tcp<'a>),
     Ping(Ping<'a>),
     Dns(Dns<'a>),
-    Invalid,
     And(Box<Expr<'a>>, Box<Expr<'a>>),
+    Invalid,
+}
+
+impl Expr<'_> {
+    #[async_recursion]
+    pub async fn execute(&self) -> (bool, Vec<String>) {
+        match self {
+            Expr::Http(http) => http.execute().await,
+            Expr::Tcp(tcp) => panic!(),   // tcp.execute(),
+            Expr::Ping(ping) => panic!(), // ping.execute(),
+            Expr::Dns(dns) => panic!(),   // dns.execute(),
+            Expr::Invalid => (false, vec!["Invalid expression".to_owned()]),
+            Expr::And(lhs, rhs) => {
+                let (lhs_result, lhs_errors) = lhs.execute().await;
+                let (rhs_result, rhs_errors) = rhs.execute().await;
+
+                let result = lhs_result && rhs_result;
+                let mut errors = lhs_errors;
+                errors.extend(rhs_errors);
+
+                (result, errors)
+            }
+        }
+    }
+
+    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+        match self {
+            Expr::Http(http) => http.execute_blocking(),
+            Expr::Tcp(tcp) => panic!(),   // tcp.execute(),
+            Expr::Ping(ping) => panic!(), // ping.execute(),
+            Expr::Dns(dns) => panic!(),   // dns.execute(),
+            Expr::Invalid => (false, vec!["a".to_owned()]),
+            Expr::And(lhs, rhs) => {
+                let (lhs_result, lhs_errors) = lhs.execute_blocking();
+                let (rhs_result, rhs_errors) = rhs.execute_blocking();
+
+                let result = lhs_result && rhs_result;
+                let mut errors = lhs_errors;
+                errors.extend(rhs_errors);
+
+                (result, errors)
+            }
+        }
+    }
 }
 
 impl Display for Expr<'_> {
@@ -45,6 +90,234 @@ pub struct Http<'a> {
     status_code: Option<u16>,
     response_headers: Vec<(&'a str, &'a str)>,
     response_body: Option<Body<'a>>,
+}
+
+impl Http<'_> {
+    pub async fn execute(&self) -> (bool, Vec<String>) {
+        todo!()
+    }
+
+    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+        let client = reqwest::blocking::Client::new();
+
+        let mut errors = vec![];
+
+        let mut method = reqwest::Method::GET;
+
+        let body = if let Some(body) = &self.request_body {
+            method = reqwest::Method::POST;
+            match body {
+                Body::Base64(base64) => base64.clone(),
+                Body::Json(value) => serde_json::to_string(value).unwrap().into_bytes(),
+                Body::Text(text) => text.as_bytes().to_vec(),
+                _ => unreachable!(),
+            }
+        } else {
+            vec![]
+        };
+
+        if let Some(verb) = &self.verb {
+            match verb {
+                HttpVerb::Get => method = reqwest::Method::GET,
+                HttpVerb::Head => method = reqwest::Method::HEAD,
+                HttpVerb::Post => method = reqwest::Method::POST,
+                HttpVerb::Put => method = reqwest::Method::PUT,
+                HttpVerb::Delete => method = reqwest::Method::DELETE,
+                HttpVerb::Connect => method = reqwest::Method::CONNECT,
+                HttpVerb::Options => method = reqwest::Method::OPTIONS,
+                HttpVerb::Trace => method = reqwest::Method::TRACE,
+                HttpVerb::Patch => method = reqwest::Method::PATCH,
+                HttpVerb::Invalid => {}
+            }
+        };
+
+        let url = reqwest::Url::parse(self.url).unwrap();
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for header in self.request_headers.iter() {
+            let val = reqwest::header::HeaderValue::from_str(header.1);
+            if let Err(e) = val {
+                errors.push(e.to_string());
+                continue;
+            }
+            let val = val.unwrap();
+
+            let name = reqwest::header::HeaderName::from_str(header.0).map_err(|e| e.to_string());
+
+            if let Err(e) = name {
+                errors.push(e);
+                continue;
+            }
+            let name = name.unwrap();
+
+            let result = headers.try_insert(name, val).map_err(|e| e.to_string());
+            if let Err(e) = result {
+                errors.push(e);
+                continue;
+            }
+        }
+        if !errors.is_empty() {
+            return (false, errors);
+        }
+
+        let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
+
+        let request = client
+            .request(method, url)
+            .headers(headers)
+            .timeout(timeout)
+            .body(body)
+            .build();
+        if let Err(e) = request {
+            errors.push(e.to_string());
+            return (false, errors);
+        }
+        let request = request.unwrap();
+
+        tracing::info!(
+            method = request.method().as_str(),
+            url = request.url().as_str(),
+            headers = ?request.headers(),
+            "Executing request",
+        );
+
+        let response = client.execute(request).map_err(|e| e.to_string());
+        if let Err(e) = response {
+            errors.push(e);
+            return (false, errors);
+        }
+        let response = response.unwrap();
+
+        tracing::info!(
+            status = ?response.status(),
+            headers = ?response.headers(),
+            "Received response",
+        );
+
+        if let Some(status_code) = self.status_code {
+            if response.status().as_u16() != status_code {
+                errors.push(format!(
+                    "Expected status code {}, got {}",
+                    status_code,
+                    response.status().as_u16()
+                ));
+            }
+        }
+
+        let response_headers = response.headers();
+        for (name, value) in self.response_headers.iter() {
+            let lower_name = name.to_ascii_lowercase();
+            let header = response_headers.get(&lower_name);
+
+            if let Some(header) = header {
+                let header = header.to_str().unwrap();
+                if header != *value {
+                    errors.push(format!(
+                        "Expected header {} to be {}, got {}",
+                        name, value, header
+                    ));
+                }
+            } else {
+                errors.push(format!(
+                    "Expected header {} to be {}, got none",
+                    name, value
+                ));
+            }
+        }
+
+        if let Some(body) = &self.response_body {
+            match body {
+                Body::Base64(base64) => {
+                    let bytes = response.bytes();
+                    if let Ok(bytes) = bytes {
+                        if bytes != base64 {
+                            errors.push(format!(
+                                "Expected base64 body to be {}, got {}",
+                                base64::prelude::BASE64_STANDARD.encode(base64),
+                                base64::prelude::BASE64_STANDARD.encode(bytes)
+                            ));
+                        }
+                    } else if let Err(e) = bytes {
+                        errors.push(e.to_string());
+                    }
+                }
+                Body::Text(text) => {
+                    let response_text = response.text();
+                    if let Ok(response_text) = response_text {
+                        if response_text != *text {
+                            errors.push(format!(
+                                "Expected text body to be {}, got {}",
+                                text, response_text
+                            ));
+                        }
+                    } else if let Err(e) = response_text {
+                        errors.push(e.to_string());
+                    }
+                }
+                Body::Json(value) => {
+                    let json = response.json::<Value>();
+                    if let Ok(json) = json {
+                        if json != *value {
+                            errors.push(format!(
+                                "Expected JSON body to be {}, got {}",
+                                serde_json::to_string(value).unwrap(),
+                                serde_json::to_string(&json).unwrap()
+                            ));
+                        }
+                    } else if let Err(e) = json {
+                        errors.push(e.to_string());
+                    }
+                }
+                Body::Jq { body: _, filter } => {
+                    let json = response.json::<Value>();
+                    if let Ok(json) = json {
+                        let inputs = jaq_interpret::RcIter::new(core::iter::empty());
+
+                        let out = filter.run((
+                            jaq_interpret::Ctx::new([], &inputs),
+                            jaq_interpret::Val::from(json),
+                        ));
+
+                        let response = out.into_iter().collect::<Vec<_>>();
+
+                        if response.is_empty() {
+                            errors.push("JQ filter returned no results".to_owned());
+                        }
+
+                        if let Some(Ok(item)) = response.first() {
+                            if !item.as_bool() {
+                                errors.push("JQ filter returned false".to_owned());
+                            }
+                        }
+
+                        for item in response.iter() {
+                            tracing::info!("JQ filter result: {:?}", item);
+                        }
+                    } else if let Err(e) = json {
+                        errors.push(e.to_string());
+                    }
+                }
+                Body::Regex(r) => {
+                    let text = response.text();
+                    if let Ok(text) = text {
+                        if !r.is_match(&text) {
+                            errors
+                                .push(format!("Expected body to match regex {}, got {}", r, text));
+                        }
+                    } else if let Err(e) = text {
+                        errors.push(e.to_string());
+                    }
+                }
+                Body::Invalid => {}
+            }
+        }
+
+        if errors.is_empty() {
+            (true, errors)
+        } else {
+            (false, errors)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -103,14 +376,34 @@ impl Display for Http<'_> {
         Ok(())
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Body<'a> {
     Json(Value),
     Text(String),
-    Base64(&'a str),
-    Jq { body: &'a str, expr: jaq_syn::Main },
+    Base64(Vec<u8>),
+    Jq {
+        body: &'a str,
+        filter: jaq_interpret::Filter,
+    },
     Regex(Regex),
     Invalid,
+}
+
+impl std::fmt::Debug for Body<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Body::Json(value) => write!(f, "Json({})", value),
+            Body::Text(text) => write!(f, "Text({})", text),
+            Body::Base64(base64) => write!(
+                f,
+                "Base64({})",
+                base64::prelude::BASE64_STANDARD.encode(base64)
+            ),
+            Body::Jq { body, filter: _ } => write!(f, "Jq({})", body),
+            Body::Regex(r) => write!(f, "Regex({})", r),
+            Body::Invalid => write!(f, "Invalid"),
+        }
+    }
 }
 
 impl Display for Body<'_> {
@@ -130,8 +423,10 @@ impl Display for Body<'_> {
 
                 write!(f, r#"<{}"{}"{}>"#, hashes_string, text, hashes_string)?
             }
-            Body::Base64(base64) => write!(f, "<{}>", base64)?,
-            Body::Jq { body, expr: _ } => write!(f, "<({})>", body)?,
+            Body::Base64(base64) => {
+                write!(f, "<{}>", base64::prelude::BASE64_STANDARD.encode(base64))?
+            }
+            Body::Jq { body, filter: _ } => write!(f, "<({})>", body)?,
             Body::Regex(r) => write!(f, "</{}/>", r)?,
             Body::Invalid => write!(f, "")?,
         }
@@ -518,14 +813,17 @@ impl<'a> chumsky::error::Error<'a, &'a str> for MyError<'a> {
 }
 
 fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (), usize>> {
-    let header = just("[")
-        .ignore_then(text::ident())
+    let header = none_of(":]")
+        .repeated()
+        .to_slice()
         .then_ignore(just(":").then(whitespace()))
-        .then(text::ident())
-        .then_ignore(just("]").recover_with(skip_then_retry_until(any().ignored(), end())))
+        .then(none_of("]").repeated().to_slice())
+        .delimited_by(just("["), just("]"))
         .boxed();
 
-    let http_verb = text::ident()
+    let http_verb = none_of("]")
+        .repeated()
+        .to_slice()
         .validate(|verb_str: &str, e, emitter| match closest_verb(verb_str) {
             Ok(verb) => (verb, e.span()),
             Err(verb) => match verb {
@@ -679,7 +977,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             let span: SimpleSpan<usize> = e.span();
 
             match base64::prelude::BASE64_STANDARD.decode(body) {
-                Ok(_) => (Body::Base64(body), span),
+                Ok(body) => (Body::Base64(body), span),
                 Err(_) => {
                     let report = Report::build(ReportKind::Error, (), span.start)
                         .with_message("Invalid base64 body")
@@ -820,7 +1118,11 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             }
 
             match expr {
-                Some(expr) => (Body::Jq { body, expr }, span),
+                Some(expr) => {
+                    let filter = defs.compile(expr);
+
+                    (Body::Jq { body, filter }, span)
+                }
                 None => (Body::Invalid, span),
             }
         })
