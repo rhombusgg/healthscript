@@ -17,7 +17,8 @@ fn request_body_json() {
 
     let ast = ast.unwrap();
 
-    assert_eq!(ast.to_string(), input);
+    let canonical = r#"<#{"x":5}#>(https://example.com)"#;
+    assert_eq!(ast.to_string(), canonical);
 }
 
 #[test]
@@ -27,7 +28,8 @@ fn request_body_text() {
 
     let ast = ast.unwrap();
 
-    assert_eq!(ast.to_string(), input);
+    let canonical = r##"<#"hello"#>(https://example.com)"##;
+    assert_eq!(ast.to_string(), canonical);
 }
 
 #[test]

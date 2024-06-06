@@ -14,6 +14,7 @@ fn single_url() {
                     verb: None,
                     request_body: None,
                     url: "https://example.com",
+                    timeout: None,
                     status_code: None,
                     response_headers: [],
                     response_body: None,
@@ -39,6 +40,7 @@ fn http_verb() {
                     ),
                     request_body: None,
                     url: "https://example.com",
+                    timeout: None,
                     status_code: None,
                     response_headers: [],
                     response_body: None,
@@ -62,6 +64,7 @@ fn response_body_regex() {
                     verb: None,
                     request_body: None,
                     url: "https://example.com",
+                    timeout: None,
                     status_code: None,
                     response_headers: [],
                     response_body: Some(
@@ -91,6 +94,7 @@ fn response_body_jq() {
                     verb: None,
                     request_body: None,
                     url: "https://example.com",
+                    timeout: None,
                     status_code: None,
                     response_headers: [],
                     response_body: Some(
