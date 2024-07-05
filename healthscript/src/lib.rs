@@ -1,14 +1,22 @@
-use std::{fmt::Display, ops::Range, str::FromStr};
+use std::{
+    borrow::Cow,
+    fmt::Display,
+    net::ToSocketAddrs,
+    ops::Range,
+    str::{from_utf8, FromStr},
+};
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use base64::Engine;
 use chumsky::{prelude::*, text::whitespace, util::MaybeRef};
 
 use async_recursion::async_recursion;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use jaq_interpret::FilterT;
 use regex::Regex;
 use serde_json::Value;
 use strsim::normalized_levenshtein;
+use tokio::io::AsyncReadExt;
 use yansi::Paint;
 
 pub type Span = SimpleSpan<usize>;
@@ -29,13 +37,13 @@ impl Expr<'_> {
     pub async fn execute(&self) -> (bool, Vec<String>) {
         match self {
             Expr::Http(http) => http.execute().await,
-            Expr::Tcp(tcp) => panic!(),   // tcp.execute(),
-            Expr::Ping(ping) => panic!(), // ping.execute(),
-            Expr::Dns(dns) => panic!(),   // dns.execute(),
+            Expr::Tcp(tcp) => tcp.execute().await,
+            Expr::Ping(ping) => ping.execute().await,
+            Expr::Dns(dns) => dns.execute().await,
             Expr::Invalid => (false, vec!["Invalid expression".to_owned()]),
             Expr::And(lhs, rhs) => {
-                let (lhs_result, lhs_errors) = lhs.execute().await;
-                let (rhs_result, rhs_errors) = rhs.execute().await;
+                let ((lhs_result, lhs_errors), (rhs_result, rhs_errors)) =
+                    tokio::join!(lhs.execute(), rhs.execute());
 
                 let result = lhs_result && rhs_result;
                 let mut errors = lhs_errors;
@@ -49,10 +57,10 @@ impl Expr<'_> {
     pub fn execute_blocking(&self) -> (bool, Vec<String>) {
         match self {
             Expr::Http(http) => http.execute_blocking(),
-            Expr::Tcp(tcp) => panic!(),   // tcp.execute(),
-            Expr::Ping(ping) => panic!(), // ping.execute(),
-            Expr::Dns(dns) => panic!(),   // dns.execute(),
-            Expr::Invalid => (false, vec!["a".to_owned()]),
+            Expr::Tcp(tcp) => tcp.execute_blocking(),
+            Expr::Ping(ping) => ping.execute_blocking(),
+            Expr::Dns(dns) => dns.execute_blocking(),
+            Expr::Invalid => (false, vec!["Invalid expression".to_owned()]),
             Expr::And(lhs, rhs) => {
                 let (lhs_result, lhs_errors) = lhs.execute_blocking();
                 let (rhs_result, rhs_errors) = rhs.execute_blocking();
@@ -94,12 +102,6 @@ pub struct Http<'a> {
 
 impl Http<'_> {
     pub async fn execute(&self) -> (bool, Vec<String>) {
-        todo!()
-    }
-
-    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
-        let client = reqwest::blocking::Client::new();
-
         let mut errors = vec![];
 
         let mut method = reqwest::Method::GET;
@@ -156,12 +158,14 @@ impl Http<'_> {
                 continue;
             }
         }
+
+        let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
+
         if !errors.is_empty() {
             return (false, errors);
         }
 
-        let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
-
+        let client = reqwest::Client::new();
         let request = client
             .request(method, url)
             .headers(headers)
@@ -181,7 +185,7 @@ impl Http<'_> {
             "Executing request",
         );
 
-        let response = client.execute(request).map_err(|e| e.to_string());
+        let response = client.execute(request).await.map_err(|e| e.to_string());
         if let Err(e) = response {
             errors.push(e);
             return (false, errors);
@@ -228,7 +232,7 @@ impl Http<'_> {
         if let Some(body) = &self.response_body {
             match body {
                 Body::Base64(base64) => {
-                    let bytes = response.bytes();
+                    let bytes = response.bytes().await;
                     if let Ok(bytes) = bytes {
                         if bytes != base64 {
                             errors.push(format!(
@@ -242,7 +246,7 @@ impl Http<'_> {
                     }
                 }
                 Body::Text(text) => {
-                    let response_text = response.text();
+                    let response_text = response.text().await;
                     if let Ok(response_text) = response_text {
                         if response_text != *text {
                             errors.push(format!(
@@ -255,7 +259,7 @@ impl Http<'_> {
                     }
                 }
                 Body::Json(value) => {
-                    let json = response.json::<Value>();
+                    let json = response.json::<Value>().await;
                     if let Ok(json) = json {
                         if json != *value {
                             errors.push(format!(
@@ -269,7 +273,7 @@ impl Http<'_> {
                     }
                 }
                 Body::Jq { body: _, filter } => {
-                    let json = response.json::<Value>();
+                    let json = response.json::<Value>().await;
                     if let Ok(json) = json {
                         let inputs = jaq_interpret::RcIter::new(core::iter::empty());
 
@@ -298,7 +302,7 @@ impl Http<'_> {
                     }
                 }
                 Body::Regex(r) => {
-                    let text = response.text();
+                    let text = response.text().await;
                     if let Ok(text) = text {
                         if !r.is_match(&text) {
                             errors
@@ -317,6 +321,15 @@ impl Http<'_> {
         } else {
             (false, errors)
         }
+    }
+
+    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(self.execute())
     }
 }
 
@@ -464,6 +477,76 @@ pub struct Tcp<'a> {
     response_body: Option<Body<'a>>,
 }
 
+impl Tcp<'_> {
+    pub async fn execute_inner(&self) -> (bool, Vec<String>) {
+        let addr = self.uri.to_socket_addrs().unwrap().next().unwrap();
+
+        let response_body = self.response_body.clone();
+
+        let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await else {
+            return (false, vec!["Failed to connect to tcp stream".to_owned()]);
+        };
+
+        let mut accumulated_data = Vec::new();
+
+        let mut buffer = [0; 1];
+        while stream.read(&mut buffer).await.unwrap() > 0 {
+            accumulated_data.push(buffer[0]);
+            println!("Received data: {:?}", accumulated_data);
+
+            if let Some(body) = response_body.clone() {
+                match body {
+                    Body::Base64(base64) => {
+                        if base64 == accumulated_data {
+                            return (true, vec![]);
+                        }
+                    }
+                    Body::Text(text) => {
+                        if let Ok(accumulated_string) = from_utf8(&accumulated_data) {
+                            if text == accumulated_string {
+                                return (true, vec![]);
+                            }
+                        }
+                    }
+                    Body::Regex(r) => {
+                        if let Ok(accumulated_string) = from_utf8(&accumulated_data) {
+                            if r.is_match(accumulated_string) {
+                                return (true, vec![]);
+                            }
+                        }
+                    }
+                    Body::Invalid => {}
+                    Body::Jq { body: _, filter: _ } => unreachable!(),
+                    Body::Json(_) => unreachable!(),
+                }
+            } else {
+                return (true, vec![]);
+            }
+        }
+
+        return (false, vec![]);
+    }
+
+    pub async fn execute(&self) -> (bool, Vec<String>) {
+        let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
+
+        let Ok(result) = tokio::time::timeout(timeout, self.execute_inner()).await else {
+            return (false, vec!["Timeout".to_owned()]);
+        };
+
+        result
+    }
+
+    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(self.execute())
+    }
+}
+
 impl Display for Tcp<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(tcp://{})", self.uri)?;
@@ -486,6 +569,43 @@ pub struct Ping<'a> {
     timeout: Option<u64>,
 }
 
+impl Ping<'_> {
+    pub async fn execute(&self) -> (bool, Vec<String>) {
+        let addr = self.uri.to_socket_addrs().unwrap().next().unwrap();
+        let ip = addr.ip();
+
+        let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
+
+        let client = match ip {
+            std::net::IpAddr::V4(_) => {
+                surge_ping::Client::new(&surge_ping::Config::default()).unwrap()
+            }
+            std::net::IpAddr::V6(_) => surge_ping::Client::new(
+                &surge_ping::Config::builder()
+                    .kind(surge_ping::ICMP::V6)
+                    .build(),
+            )
+            .unwrap(),
+        };
+        let mut pinger = client.pinger(ip, surge_ping::PingIdentifier(111)).await;
+        pinger.timeout(timeout);
+        let payload = [0; 56];
+        match pinger.ping(surge_ping::PingSequence(0), &payload).await {
+            Ok(_) => (true, vec![]),
+            Err(_) => (false, vec!["Failed".to_owned()]),
+        }
+    }
+
+    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(self.execute())
+    }
+}
+
 impl Display for Ping<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(ping://{})", self.uri)?;
@@ -503,6 +623,51 @@ pub struct Dns<'a> {
     uri: &'a str,
     server: Option<&'a str>,
     timeout: Option<u64>,
+}
+
+impl Dns<'_> {
+    pub async fn execute(&self) -> (bool, Vec<String>) {
+        let resolver_config = if let Some(server) = self.server {
+            let server = if server.contains(':') {
+                Cow::from(server)
+            } else {
+                Cow::from(format!("{server}:53"))
+            };
+
+            let addr = server.to_socket_addrs().unwrap().next().unwrap();
+            let mut config = ResolverConfig::new();
+            config.add_name_server(NameServerConfig::new(
+                addr,
+                hickory_resolver::config::Protocol::Tcp,
+            ));
+            config
+        } else {
+            ResolverConfig::google()
+        };
+
+        let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
+
+        let resolver =
+            hickory_resolver::AsyncResolver::tokio(resolver_config, ResolverOpts::default());
+        let Ok(lookup) = tokio::time::timeout(timeout, resolver.lookup_ip(self.uri)).await else {
+            return (false, vec!["Timeout".to_owned()]);
+        };
+
+        if let Err(_) = lookup {
+            return (false, vec!["Failed to resolve dns".to_owned()]);
+        }
+
+        return (true, vec![]);
+    }
+
+    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(self.execute())
+    }
 }
 
 impl Display for Dns<'_> {

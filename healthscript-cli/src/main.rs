@@ -9,7 +9,8 @@ struct Args {
     script: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
@@ -27,7 +28,7 @@ fn main() {
     println!("{:#?}", ast);
     if let Some(ast) = ast {
         println!("{}", ast);
-        let result = ast.execute_blocking();
+        let result = ast.execute().await;
         println!("{:#?}", result);
     }
 }
