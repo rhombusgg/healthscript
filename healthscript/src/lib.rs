@@ -16,11 +16,85 @@ use jaq_interpret::FilterT;
 use regex::Regex;
 use serde_json::Value;
 use strsim::normalized_levenshtein;
+use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use yansi::Paint;
 
 pub type Span = SimpleSpan<usize>;
 pub type Spanned<T> = (T, Span);
+
+#[derive(Error, Debug)]
+pub enum HealthscriptError {
+    #[error("Invalid expression")]
+    InvalidExpression,
+
+    #[error("Timed out after {duration:?}")]
+    Timeout { duration: std::time::Duration },
+
+    #[error("Failed to resolve DNS")]
+    FailedToResolve,
+
+    #[error(transparent)]
+    Http(#[from] HealthscriptHttpError),
+
+    #[error(transparent)]
+    Tcp(#[from] HealthscriptTcpError),
+}
+
+#[derive(Error, Debug)]
+pub enum HealthscriptTcpError {
+    #[error("Failed to connect to TCP stream")]
+    ConnectionFailed,
+}
+
+#[derive(Error, Debug)]
+pub enum HealthscriptHttpError {
+    #[error("Invalid header value")]
+    InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
+
+    #[error("Invalid header name")]
+    InvalidHeaderName(String),
+
+    #[error("Too many headers")]
+    TooManyHeaders(String),
+
+    #[error("Failed to build request")]
+    RequestBuildError(reqwest::Error),
+
+    #[error("Failed to execute request")]
+    RequestError(reqwest::Error),
+
+    #[error("Failed to decode response")]
+    DecodeError(reqwest::Error),
+
+    #[error("Expected status code {expected}, got {found}")]
+    UnexpectedStatusCode { expected: u16, found: u16 },
+
+    #[error("Expected header {header} to be {expected}, got {found:?}")]
+    UnexpectedHeader {
+        header: String,
+        expected: String,
+        found: Option<String>,
+    },
+
+    #[error("Expected base64 body {expected}, got {found}")]
+    UnexpectedBase64 { expected: String, found: String },
+
+    #[error("Expected text body {expected}, got {found}")]
+    UnexpectedText { expected: String, found: String },
+
+    #[error("Expected JSON body {expected}, got {found}")]
+    UnexpectedJson { expected: Value, found: Value },
+
+    #[error("Expected Regex body {expected}, got {found}")]
+    UnexpectedRegex { expected: Regex, found: String },
+
+    #[error("JQ filter returned no results")]
+    JqNoResults,
+
+    #[error("JQ filter returned false")]
+    JqFalse,
+}
 
 #[derive(Debug)]
 pub enum Expr<'a> {
@@ -34,44 +108,44 @@ pub enum Expr<'a> {
 
 impl Expr<'_> {
     #[async_recursion]
-    pub async fn execute(&self) -> (bool, Vec<String>) {
+    pub async fn execute(&self) -> (bool, Vec<Vec<HealthscriptError>>) {
         match self {
-            Expr::Http(http) => http.execute().await,
-            Expr::Tcp(tcp) => tcp.execute().await,
-            Expr::Ping(ping) => ping.execute().await,
-            Expr::Dns(dns) => dns.execute().await,
-            Expr::Invalid => (false, vec!["Invalid expression".to_owned()]),
+            Expr::Http(http) => {
+                let r = http.execute().await;
+                (r.0, vec![r.1])
+            }
+            Expr::Tcp(tcp) => {
+                let r = tcp.execute().await;
+                (r.0, vec![r.1])
+            }
+            Expr::Ping(ping) => {
+                let r = ping.execute().await;
+                (r.0, vec![r.1])
+            }
+            Expr::Dns(dns) => {
+                let r = dns.execute().await;
+                (r.0, vec![r.1])
+            }
+            Expr::Invalid => (false, vec![vec![HealthscriptError::InvalidExpression]]),
             Expr::And(lhs, rhs) => {
-                let ((lhs_result, lhs_errors), (rhs_result, rhs_errors)) =
+                let ((lhs_result, mut lhs_errors), (rhs_result, rhs_errors)) =
                     tokio::join!(lhs.execute(), rhs.execute());
 
                 let result = lhs_result && rhs_result;
-                let mut errors = lhs_errors;
-                errors.extend(rhs_errors);
+                lhs_errors.extend(rhs_errors);
 
-                (result, errors)
+                (result, lhs_errors)
             }
         }
     }
 
-    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
-        match self {
-            Expr::Http(http) => http.execute_blocking(),
-            Expr::Tcp(tcp) => tcp.execute_blocking(),
-            Expr::Ping(ping) => ping.execute_blocking(),
-            Expr::Dns(dns) => dns.execute_blocking(),
-            Expr::Invalid => (false, vec!["Invalid expression".to_owned()]),
-            Expr::And(lhs, rhs) => {
-                let (lhs_result, lhs_errors) = lhs.execute_blocking();
-                let (rhs_result, rhs_errors) = rhs.execute_blocking();
+    pub fn execute_blocking(&self) -> (bool, Vec<Vec<HealthscriptError>>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
-                let result = lhs_result && rhs_result;
-                let mut errors = lhs_errors;
-                errors.extend(rhs_errors);
-
-                (result, errors)
-            }
-        }
+        rt.block_on(self.execute())
     }
 }
 
@@ -101,7 +175,7 @@ pub struct Http<'a> {
 }
 
 impl Http<'_> {
-    pub async fn execute(&self) -> (bool, Vec<String>) {
+    pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
         let mut errors = vec![];
 
         let mut method = reqwest::Method::GET;
@@ -139,7 +213,7 @@ impl Http<'_> {
         for header in self.request_headers.iter() {
             let val = reqwest::header::HeaderValue::from_str(header.1);
             if let Err(e) = val {
-                errors.push(e.to_string());
+                errors.push(HealthscriptHttpError::InvalidHeaderValue(e).into());
                 continue;
             }
             let val = val.unwrap();
@@ -147,14 +221,14 @@ impl Http<'_> {
             let name = reqwest::header::HeaderName::from_str(header.0).map_err(|e| e.to_string());
 
             if let Err(e) = name {
-                errors.push(e);
+                errors.push(HealthscriptHttpError::InvalidHeaderName(e).into());
                 continue;
             }
             let name = name.unwrap();
 
             let result = headers.try_insert(name, val).map_err(|e| e.to_string());
             if let Err(e) = result {
-                errors.push(e);
+                errors.push(HealthscriptHttpError::TooManyHeaders(e).into());
                 continue;
             }
         }
@@ -173,26 +247,26 @@ impl Http<'_> {
             .body(body)
             .build();
         if let Err(e) = request {
-            errors.push(e.to_string());
+            errors.push(HealthscriptHttpError::RequestBuildError(e).into());
             return (false, errors);
         }
         let request = request.unwrap();
 
-        tracing::info!(
+        tracing::trace!(
             method = request.method().as_str(),
             url = request.url().as_str(),
             headers = ?request.headers(),
             "Executing request",
         );
 
-        let response = client.execute(request).await.map_err(|e| e.to_string());
+        let response = client.execute(request).await;
         if let Err(e) = response {
-            errors.push(e);
+            errors.push(HealthscriptHttpError::RequestError(e).into());
             return (false, errors);
         }
         let response = response.unwrap();
 
-        tracing::info!(
+        tracing::trace!(
             status = ?response.status(),
             headers = ?response.headers(),
             "Received response",
@@ -200,11 +274,13 @@ impl Http<'_> {
 
         if let Some(status_code) = self.status_code {
             if response.status().as_u16() != status_code {
-                errors.push(format!(
-                    "Expected status code {}, got {}",
-                    status_code,
-                    response.status().as_u16()
-                ));
+                errors.push(
+                    HealthscriptHttpError::UnexpectedStatusCode {
+                        expected: status_code,
+                        found: response.status().as_u16(),
+                    }
+                    .into(),
+                );
             }
         }
 
@@ -216,16 +292,24 @@ impl Http<'_> {
             if let Some(header) = header {
                 let header = header.to_str().unwrap();
                 if header != *value {
-                    errors.push(format!(
-                        "Expected header {} to be {}, got {}",
-                        name, value, header
-                    ));
+                    errors.push(
+                        HealthscriptHttpError::UnexpectedHeader {
+                            header: name.to_string(),
+                            expected: value.to_string(),
+                            found: Some(header.to_string()),
+                        }
+                        .into(),
+                    );
                 }
             } else {
-                errors.push(format!(
-                    "Expected header {} to be {}, got none",
-                    name, value
-                ));
+                errors.push(
+                    HealthscriptHttpError::UnexpectedHeader {
+                        header: name.to_string(),
+                        expected: value.to_string(),
+                        found: None,
+                    }
+                    .into(),
+                );
             }
         }
 
@@ -235,41 +319,48 @@ impl Http<'_> {
                     let bytes = response.bytes().await;
                     if let Ok(bytes) = bytes {
                         if bytes != base64 {
-                            errors.push(format!(
-                                "Expected base64 body to be {}, got {}",
-                                base64::prelude::BASE64_STANDARD.encode(base64),
-                                base64::prelude::BASE64_STANDARD.encode(bytes)
-                            ));
+                            errors.push(
+                                HealthscriptHttpError::UnexpectedBase64 {
+                                    expected: base64::prelude::BASE64_STANDARD.encode(base64),
+                                    found: base64::prelude::BASE64_STANDARD.encode(bytes),
+                                }
+                                .into(),
+                            );
                         }
                     } else if let Err(e) = bytes {
-                        errors.push(e.to_string());
+                        errors.push(HealthscriptHttpError::DecodeError(e).into());
                     }
                 }
                 Body::Text(text) => {
                     let response_text = response.text().await;
                     if let Ok(response_text) = response_text {
                         if response_text != *text {
-                            errors.push(format!(
-                                "Expected text body to be {}, got {}",
-                                text, response_text
-                            ));
+                            errors.push(
+                                HealthscriptHttpError::UnexpectedText {
+                                    expected: text.to_string(),
+                                    found: response_text,
+                                }
+                                .into(),
+                            );
                         }
                     } else if let Err(e) = response_text {
-                        errors.push(e.to_string());
+                        errors.push(HealthscriptHttpError::DecodeError(e).into());
                     }
                 }
                 Body::Json(value) => {
                     let json = response.json::<Value>().await;
                     if let Ok(json) = json {
                         if json != *value {
-                            errors.push(format!(
-                                "Expected JSON body to be {}, got {}",
-                                serde_json::to_string(value).unwrap(),
-                                serde_json::to_string(&json).unwrap()
-                            ));
+                            errors.push(
+                                HealthscriptHttpError::UnexpectedJson {
+                                    expected: value.clone(),
+                                    found: json,
+                                }
+                                .into(),
+                            );
                         }
                     } else if let Err(e) = json {
-                        errors.push(e.to_string());
+                        errors.push(HealthscriptHttpError::DecodeError(e).into());
                     }
                 }
                 Body::Jq { body: _, filter } => {
@@ -285,31 +376,32 @@ impl Http<'_> {
                         let response = out.into_iter().collect::<Vec<_>>();
 
                         if response.is_empty() {
-                            errors.push("JQ filter returned no results".to_owned());
+                            errors.push(HealthscriptHttpError::JqNoResults.into());
                         }
 
                         if let Some(Ok(item)) = response.first() {
                             if !item.as_bool() {
-                                errors.push("JQ filter returned false".to_owned());
+                                errors.push(HealthscriptHttpError::JqFalse.into());
                             }
                         }
-
-                        for item in response.iter() {
-                            tracing::info!("JQ filter result: {:?}", item);
-                        }
                     } else if let Err(e) = json {
-                        errors.push(e.to_string());
+                        errors.push(HealthscriptHttpError::DecodeError(e).into());
                     }
                 }
                 Body::Regex(r) => {
                     let text = response.text().await;
                     if let Ok(text) = text {
                         if !r.is_match(&text) {
-                            errors
-                                .push(format!("Expected body to match regex {}, got {}", r, text));
+                            errors.push(
+                                HealthscriptHttpError::UnexpectedRegex {
+                                    expected: r.clone(),
+                                    found: text,
+                                }
+                                .into(),
+                            );
                         }
                     } else if let Err(e) = text {
-                        errors.push(e.to_string());
+                        errors.push(HealthscriptHttpError::DecodeError(e).into());
                     }
                 }
                 Body::Invalid => {}
@@ -323,7 +415,7 @@ impl Http<'_> {
         }
     }
 
-    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+    pub fn execute_blocking(&self) -> (bool, Vec<HealthscriptError>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -478,13 +570,13 @@ pub struct Tcp<'a> {
 }
 
 impl Tcp<'_> {
-    pub async fn execute_inner(&self) -> (bool, Vec<String>) {
+    pub async fn execute_inner(&self) -> (bool, Vec<HealthscriptError>) {
         let addr = self.uri.to_socket_addrs().unwrap().next().unwrap();
 
         let response_body = self.response_body.clone();
 
         let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await else {
-            return (false, vec!["Failed to connect to tcp stream".to_owned()]);
+            return (false, vec![HealthscriptTcpError::ConnectionFailed.into()]);
         };
 
         let mut accumulated_data = Vec::new();
@@ -527,17 +619,20 @@ impl Tcp<'_> {
         return (false, vec![]);
     }
 
-    pub async fn execute(&self) -> (bool, Vec<String>) {
+    pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
         let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
 
         let Ok(result) = tokio::time::timeout(timeout, self.execute_inner()).await else {
-            return (false, vec!["Timeout".to_owned()]);
+            return (
+                false,
+                vec![HealthscriptError::Timeout { duration: timeout }],
+            );
         };
 
         result
     }
 
-    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+    pub fn execute_blocking(&self) -> (bool, Vec<HealthscriptError>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -570,7 +665,7 @@ pub struct Ping<'a> {
 }
 
 impl Ping<'_> {
-    pub async fn execute(&self) -> (bool, Vec<String>) {
+    pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
         let addr = self.uri.to_socket_addrs().unwrap().next().unwrap();
         let ip = addr.ip();
 
@@ -592,11 +687,14 @@ impl Ping<'_> {
         let payload = [0; 56];
         match pinger.ping(surge_ping::PingSequence(0), &payload).await {
             Ok(_) => (true, vec![]),
-            Err(_) => (false, vec!["Failed".to_owned()]),
+            Err(_) => (
+                false,
+                vec![HealthscriptError::Timeout { duration: timeout }.into()],
+            ),
         }
     }
 
-    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+    pub fn execute_blocking(&self) -> (bool, Vec<HealthscriptError>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -626,7 +724,7 @@ pub struct Dns<'a> {
 }
 
 impl Dns<'_> {
-    pub async fn execute(&self) -> (bool, Vec<String>) {
+    pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
         let resolver_config = if let Some(server) = self.server {
             let server = if server.contains(':') {
                 Cow::from(server)
@@ -650,17 +748,20 @@ impl Dns<'_> {
         let resolver =
             hickory_resolver::AsyncResolver::tokio(resolver_config, ResolverOpts::default());
         let Ok(lookup) = tokio::time::timeout(timeout, resolver.lookup_ip(self.uri)).await else {
-            return (false, vec!["Timeout".to_owned()]);
+            return (
+                false,
+                vec![HealthscriptError::Timeout { duration: timeout }],
+            );
         };
 
         if let Err(_) = lookup {
-            return (false, vec!["Failed to resolve dns".to_owned()]);
+            return (false, vec![HealthscriptError::FailedToResolve]);
         }
 
         return (true, vec![]);
     }
 
-    pub fn execute_blocking(&self) -> (bool, Vec<String>) {
+    pub fn execute_blocking(&self) -> (bool, Vec<HealthscriptError>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
