@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     fmt::Display,
     net::ToSocketAddrs,
     ops::Range,
@@ -106,7 +105,18 @@ pub enum Expr<'a> {
     Invalid,
 }
 
-impl Expr<'_> {
+impl<'a> Expr<'a> {
+    pub fn representative_uri(&'a self) -> String {
+        match self {
+            Expr::Http(http) => http.url.to_string(),
+            Expr::Tcp(tcp) => format!("tcp://{}", tcp.uri),
+            Expr::Ping(ping) => format!("ping://{}", ping.uri),
+            Expr::Dns(dns) => format!("dns://{}", dns.uri),
+            Expr::And(lhs, _) => lhs.representative_uri(),
+            Expr::Invalid => "invalid expression".to_owned(),
+        }
+    }
+
     #[async_recursion]
     pub async fn execute(&self) -> (bool, Vec<Vec<HealthscriptError>>) {
         match self {
@@ -571,7 +581,24 @@ pub struct Tcp<'a> {
 
 impl Tcp<'_> {
     pub async fn execute_inner(&self) -> (bool, Vec<HealthscriptError>) {
-        let addr = self.uri.to_socket_addrs().unwrap().next().unwrap();
+        let uri = match self.uri.split_once(':') {
+            Some((_, port)) => {
+                if port.is_empty() {
+                    format!("{}80", self.uri)
+                } else {
+                    self.uri.to_string()
+                }
+            }
+            None => format!("{}:80", self.uri),
+        };
+
+        let Ok(mut addr) = uri.to_socket_addrs() else {
+            return (false, vec![HealthscriptError::FailedToResolve]);
+        };
+
+        let Some(addr) = addr.next() else {
+            return (false, vec![HealthscriptError::FailedToResolve]);
+        };
 
         let response_body = self.response_body.clone();
 
@@ -584,7 +611,6 @@ impl Tcp<'_> {
         let mut buffer = [0; 1];
         while stream.read(&mut buffer).await.unwrap() > 0 {
             accumulated_data.push(buffer[0]);
-            println!("Received data: {:?}", accumulated_data);
 
             if let Some(body) = response_body.clone() {
                 match body {
@@ -616,7 +642,7 @@ impl Tcp<'_> {
             }
         }
 
-        return (false, vec![]);
+        (false, vec![])
     }
 
     pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
@@ -699,7 +725,7 @@ impl Ping<'_> {
             Ok(_) => (true, vec![]),
             Err(_) => (
                 false,
-                vec![HealthscriptError::Timeout { duration: timeout }.into()],
+                vec![HealthscriptError::Timeout { duration: timeout }],
             ),
         }
     }
@@ -772,11 +798,11 @@ impl Dns<'_> {
             );
         };
 
-        if let Err(_) = lookup {
+        if lookup.is_err() {
             return (false, vec![HealthscriptError::FailedToResolve]);
         }
 
-        return (true, vec![]);
+        (true, vec![])
     }
 
     pub fn execute_blocking(&self) -> (bool, Vec<HealthscriptError>) {
@@ -1249,7 +1275,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             let span: SimpleSpan<usize> = e.span();
 
             let body = if raw.is_empty() {
-                unescape_c_style(&body)
+                unescape_c_style(body)
             } else {
                 body.to_owned()
             };
@@ -1435,9 +1461,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
     .boxed();
 
     let http = choice((
-        header.clone().map(|h| HttpRequest::Header(h)),
-        http_verb.map(|v| HttpRequest::Verb(v)),
-        request_body.map(|b| HttpRequest::Body(b)),
+        header.clone().map(HttpRequest::Header),
+        http_verb.map(HttpRequest::Verb),
+        request_body.map(HttpRequest::Body),
     ))
     .repeated()
     .collect::<Vec<_>>()
@@ -1534,10 +1560,10 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
     })
     .then(
         choice((
-            header.map(|h| HttpResponse::Header(h)),
-            timeout.clone().map(|t| HttpResponse::Timeout(t)),
-            status_code.map(|c| HttpResponse::StatusCode(c)),
-            response_body.map(|b| HttpResponse::Body(b)),
+            header.map(HttpResponse::Header),
+            timeout.clone().map(HttpResponse::Timeout),
+            status_code.map(HttpResponse::StatusCode),
+            response_body.map(HttpResponse::Body),
         ))
         .repeated()
         .collect::<Vec<_>>()
@@ -1546,10 +1572,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 let timeouts = request
                     .iter()
                     .filter_map(|r| match r {
-                        HttpResponse::Timeout(t) => match t.0 {
-                            Some(d) => Some((d, t.1)),
-                            None => None,
-                        },
+                        HttpResponse::Timeout(t) => t.0.map(|d| (d, t.1)),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -1583,10 +1606,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 let status_codes = request
                     .iter()
                     .filter_map(|r| match r {
-                        HttpResponse::StatusCode(c) => match c.0 {
-                            Some(d) => Some((d, c.1)),
-                            None => None,
-                        },
+                        HttpResponse::StatusCode(c) => c.0.map(|d| (d, c.1)),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -1701,8 +1721,8 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
     let tcp = tcp_url
         .then(
             choice((
-                timeout.clone().map(|t| TcpResponse::Timeout(t)),
-                tcp_response_body.map(|b| TcpResponse::Body(b)),
+                timeout.clone().map(TcpResponse::Timeout),
+                tcp_response_body.map(TcpResponse::Body),
             ))
             .repeated()
             .collect::<Vec<_>>(),
@@ -1712,10 +1732,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 let timeouts = responses
                     .iter()
                     .filter_map(|r| match r {
-                        TcpResponse::Timeout(t) => match t.0 {
-                            Some(d) => Some((d, t.1)),
-                            None => None,
-                        },
+                        TcpResponse::Timeout(t) => t.0.map(|d| (d, t.1)),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -1813,7 +1830,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         )
         .map(|(uri, timeout)| Ping {
             uri,
-            timeout: timeout.first().map(|t| *t).flatten(),
+            timeout: timeout.first().and_then(|t| *t),
         })
         .boxed();
 
@@ -1840,15 +1857,15 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         .map(|((uri, server), timeout)| Dns {
             uri,
             server: server.first().copied(),
-            timeout: timeout.first().map(|t| *t).flatten(),
+            timeout: timeout.first().and_then(|t| *t),
         })
         .boxed();
 
     let single_expression = choice((
-        dns.map(|d| Expr::Dns(d)),
-        ping.map(|p| Expr::Ping(p)),
-        tcp.map(|t| Expr::Tcp(t)),
-        http.map(|h| Expr::Http(h)),
+        dns.map(Expr::Dns),
+        ping.map(Expr::Ping),
+        tcp.map(Expr::Tcp),
+        http.map(Expr::Http),
     ))
     .boxed();
 

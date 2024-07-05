@@ -25,6 +25,7 @@
           packages = with pkgs; [
             alejandra
             rust-toolchain
+            cargo-shuttle
           ];
         };
       }
