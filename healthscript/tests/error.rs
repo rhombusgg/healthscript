@@ -3,7 +3,7 @@ use healthscript::parse;
 
 #[test]
 fn http_verb() {
-    let input = r#"[hi](https://example.com)"#;
+    let input = r#"[hi] https://example.com"#;
     let (ast, errors) = parse(input);
 
     assert_eq!(errors.len(), 1);

@@ -2,7 +2,7 @@ use healthscript::parse;
 
 #[test]
 fn url() {
-    let input = r#"(https://example.com)"#;
+    let input = r#"https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let ast = ast.unwrap();
@@ -12,29 +12,29 @@ fn url() {
 
 #[test]
 fn request_body_json() {
-    let input = r#"<{"x":5}>(https://example.com)"#;
+    let input = r#"<{"x":5}> https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let ast = ast.unwrap();
 
-    let canonical = r#"<#{"x":5}#>(https://example.com)"#;
+    let canonical = r#"<#{"x":5}#> https://example.com"#;
     assert_eq!(ast.to_string(), canonical);
 }
 
 #[test]
 fn request_body_text() {
-    let input = r#"<"hello">(https://example.com)"#;
+    let input = r#"<"hello"> https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let ast = ast.unwrap();
 
-    let canonical = r##"<#"hello"#>(https://example.com)"##;
+    let canonical = r##"<#"hello"#> https://example.com"##;
     assert_eq!(ast.to_string(), canonical);
 }
 
 #[test]
 fn request_body_base64() {
-    let input = r#"<+uwgVQA=>(https://example.com)"#;
+    let input = r#"<+uwgVQA=> https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let ast = ast.unwrap();
@@ -44,7 +44,7 @@ fn request_body_base64() {
 
 #[test]
 fn http_verb() {
-    let input = r#"[OPTIONS](https://example.com)"#;
+    let input = r#"[OPTIONS] https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let ast = ast.unwrap();
@@ -54,7 +54,7 @@ fn http_verb() {
 
 #[test]
 fn response_body_jq() {
-    let input = r#"(https://example.com)<(.x == 3)>"#;
+    let input = r#"https://example.com <(.x == 3)>"#;
     let (ast, _errors) = parse(input);
 
     let ast = ast.unwrap();

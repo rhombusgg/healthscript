@@ -357,33 +357,33 @@ enum TcpResponse<'a> {
 impl Display for Http<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (name, value) in self.request_headers.iter() {
-            write!(f, "[{}: {}]", name, value)?;
+            write!(f, "[{}: {}] ", name, value)?;
         }
 
         if let Some(verb) = &self.verb {
-            write!(f, "[{}]", verb)?;
+            write!(f, "[{}] ", verb)?;
         }
 
         if let Some(body) = &self.request_body {
-            write!(f, "{}", body)?;
+            write!(f, "{} ", body)?;
         }
 
-        write!(f, "({})", self.url)?;
+        write!(f, "{}", self.url)?;
 
         if let Some(timeout) = self.timeout {
-            write!(f, "[{}s]", timeout)?;
+            write!(f, " [{}s]", timeout)?;
         }
 
         if let Some(status_code) = self.status_code {
-            write!(f, "[{}]", status_code)?;
+            write!(f, " [{}]", status_code)?;
         }
 
         for (name, value) in self.response_headers.iter() {
-            write!(f, "[{}: {}]", name, value)?;
+            write!(f, " [{}: {}]", name, value)?;
         }
 
         if let Some(body) = &self.response_body {
-            write!(f, "{}", body)?;
+            write!(f, " {}", body)?;
         }
 
         Ok(())
@@ -549,14 +549,14 @@ impl Tcp<'_> {
 
 impl Display for Tcp<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(tcp://{})", self.uri)?;
+        write!(f, "tcp://{}", self.uri)?;
 
         if let Some(timeout) = self.timeout {
-            write!(f, "[{}s]", timeout)?;
+            write!(f, " [{}s]", timeout)?;
         }
 
         if let Some(body) = &self.response_body {
-            write!(f, "{}", body)?;
+            write!(f, " {}", body)?;
         }
 
         Ok(())
@@ -608,10 +608,10 @@ impl Ping<'_> {
 
 impl Display for Ping<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(ping://{})", self.uri)?;
+        write!(f, "ping://{}", self.uri)?;
 
         if let Some(timeout) = self.timeout {
-            write!(f, "[{}s]", timeout)?;
+            write!(f, " [{}s]", timeout)?;
         }
 
         Ok(())
@@ -673,13 +673,13 @@ impl Dns<'_> {
 impl Display for Dns<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(server) = self.server {
-            write!(f, "(dns://{}/{})", self.uri, server)?;
+            write!(f, "dns://{}/{}", self.uri, server)?;
         } else {
-            write!(f, "(dns://{})", self.uri)?;
+            write!(f, "dns://{}", self.uri)?;
         }
 
         if let Some(timeout) = self.timeout {
-            write!(f, "[{}s]", timeout)?;
+            write!(f, " [{}s]", timeout)?;
         }
 
         Ok(())
@@ -984,6 +984,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         .then_ignore(just(":").then(whitespace()))
         .then(none_of("]").repeated().to_slice())
         .delimited_by(just("["), just("]"))
+        .padded()
         .boxed();
 
     let http_verb = none_of("]")
@@ -1023,6 +1024,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             },
         })
         .delimited_by(just("["), just("]"))
+        .padded()
         .boxed();
 
     let timeout = text::int(10)
@@ -1055,10 +1057,11 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             }
         })
         .delimited_by(just("["), just("]"))
+        .padded()
         .boxed();
 
     let url = choice((just("http://"), just("https://")))
-        .then(none_of(")").repeated())
+        .then(none_of(" ").repeated())
         .to_slice()
         .validate(|url: &str, e, emitter| {
             if reqwest::Url::parse(url).is_err() {
@@ -1066,7 +1069,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             }
             url
         })
-        .delimited_by(just("("), just(")"))
+        .padded()
         .boxed();
 
     let hashes = just('#').repeated();
@@ -1106,6 +1109,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 }
             }
         })
+        .padded()
         .boxed();
 
     let hashes = just('#').repeated();
@@ -1133,6 +1137,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
 
             (Body::Text(body), span)
         })
+        .padded()
         .boxed();
 
     let body_base64 = none_of(">")
@@ -1167,9 +1172,13 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             }
         })
         .delimited_by(just("<"), just(">"))
+        .padded()
         .boxed();
 
-    let request_body = choice((body_json.clone(), body_text.clone(), body_base64.clone())).boxed();
+    let request_body = choice((body_json.clone(), body_text.clone(), body_base64.clone()))
+        .padded()
+        .padded()
+        .boxed();
 
     let status_code = none_of("]").repeated().to_slice()
         .validate(|code: &str, e, emitter| {
@@ -1209,7 +1218,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 }
             }
         })
-        .delimited_by(just("["), just("]")).boxed();
+        .delimited_by(just("["), just("]"))
+        .padded()
+        .boxed();
 
     let hashes = just('#').repeated();
     let start = hashes.count().then_ignore(just('/'));
@@ -1238,6 +1249,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 }
             }
         })
+        .padded()
         .boxed();
 
     let hashes = just('#').repeated();
@@ -1291,6 +1303,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 None => (Body::Invalid, span),
             }
         })
+        .padded()
         .boxed();
 
     let response_body = choice((
@@ -1559,33 +1572,11 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
     )
     .boxed();
 
-    let unwrapped_http = choice((just("http://"), just("https://")))
-        .then(none_of(" ").repeated())
-        .to_slice()
-        .validate(|url: &str, e, emitter| {
-            if reqwest::Url::parse(url).is_err() {
-                emitter.emit(MyError::Rich(Rich::custom(e.span(), "Invalid URL")))
-            }
-            url
-        })
-        .map(|url| Http {
-            request_headers: vec![],
-            verb: None,
-            request_body: None,
-            url,
-            timeout: None,
-            response_headers: vec![],
-            status_code: None,
-            response_body: None,
-        })
-        .boxed();
-    let http = http.or(unwrapped_http);
-
     let tcp_response_body = choice((body_text, body_regex, body_base64)).boxed();
 
     let tcp_url = just("tcp://")
-        .ignore_then(none_of(")").repeated().to_slice())
-        .delimited_by(just("("), just(")"))
+        .ignore_then(none_of(" ").repeated().to_slice())
+        .padded()
         .boxed();
 
     let tcp = tcp_url
@@ -1687,19 +1678,9 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         })
         .boxed();
 
-    let unwrapped_tcp = just("tcp://")
-        .ignore_then(none_of(" ").repeated().to_slice())
-        .map(|uri| Tcp {
-            uri,
-            timeout: None,
-            response_body: None,
-        })
-        .boxed();
-    let tcp = tcp.or(unwrapped_tcp);
-
     let ping_url = just("ping://")
-        .ignore_then(none_of(")").repeated().to_slice())
-        .delimited_by(just("("), just(")"))
+        .ignore_then(none_of(" ").repeated().to_slice())
+        .padded()
         .boxed();
 
     let ping = ping_url
@@ -1717,23 +1698,16 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         })
         .boxed();
 
-    let unwrapped_ping = just("ping://")
-        .ignore_then(none_of(" ").repeated().to_slice())
-        .map(|uri| Ping { uri, timeout: None })
-        .boxed();
-
-    let ping = ping.or(unwrapped_ping);
-
     let dns_url = just("dns://")
-        .ignore_then(none_of("/)").repeated().at_least(1).to_slice())
+        .ignore_then(none_of("/").repeated().at_least(1).to_slice())
         .then(
             just("/")
-                .ignore_then(none_of(")").repeated().at_least(1).to_slice())
+                .ignore_then(none_of(" ").repeated().at_least(1).to_slice())
                 .repeated()
                 .at_most(1)
                 .collect::<Vec<&str>>(),
         )
-        .delimited_by(just("("), just(")"))
+        .padded()
         .boxed();
 
     let dns = dns_url
@@ -1751,24 +1725,6 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         })
         .boxed();
 
-    let unwrapped_dns = just("dns://")
-        .ignore_then(none_of("/ ").repeated().at_least(1).to_slice())
-        .then(
-            just("/")
-                .ignore_then(none_of(" ").repeated().at_least(1).to_slice())
-                .repeated()
-                .at_most(1)
-                .collect::<Vec<&str>>(),
-        )
-        .map(|(uri, server)| Dns {
-            uri,
-            server: server.first().copied(),
-            timeout: None,
-        })
-        .boxed();
-
-    let dns = dns.or(unwrapped_dns);
-
     let single_expression = choice((
         dns.map(|d| Expr::Dns(d)),
         ping.map(|p| Expr::Ping(p)),
@@ -1781,7 +1737,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
         choice((
             single_expression
                 .clone()
-                .then_ignore(just(" and "))
+                .then_ignore(just("and").padded())
                 .then(expr.clone())
                 .map(|(a, b)| Expr::And(Box::new(a), Box::new(b))),
             single_expression,

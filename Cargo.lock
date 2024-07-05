@@ -433,6 +433,7 @@ dependencies = [
  "serde_json",
  "strsim",
  "surge-ping",
+ "thiserror",
  "tokio",
  "tracing",
  "yansi",

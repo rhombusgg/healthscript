@@ -3,7 +3,7 @@ use healthscript::parse;
 
 #[test]
 fn single_url() {
-    let input = r#"(https://example.com)"#;
+    let input = r#"https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let expected = expect![[r#"
@@ -27,7 +27,7 @@ fn single_url() {
 
 #[test]
 fn http_verb() {
-    let input = r#"[GET](https://example.com)"#;
+    let input = r#"[GET] https://example.com"#;
     let (ast, _errors) = parse(input);
 
     let expected = expect![[r#"
@@ -53,7 +53,7 @@ fn http_verb() {
 
 #[test]
 fn http_verb_status_code() {
-    let input = r#"[GET](https://example.com)[404]"#;
+    let input = r#"[GET] https://example.com [404]"#;
     let (ast, _errors) = parse(input);
 
     let expected = expect![[r#"
@@ -81,7 +81,7 @@ fn http_verb_status_code() {
 
 #[test]
 fn response_body_regex() {
-    let input = r#"(https://example.com)</hi/>"#;
+    let input = r#"https://example.com </hi/>"#;
     let (ast, _errors) = parse(input);
 
     let expected = expect![[r#"
@@ -107,7 +107,7 @@ fn response_body_regex() {
 
 #[test]
 fn response_body_jq() {
-    let input = r#"(https://example.com)<(.x == 3)>"#;
+    let input = r#"https://example.com <(.x == 3)>"#;
     let (ast, _errors) = parse(input);
 
     let expected = expect![[r#"
