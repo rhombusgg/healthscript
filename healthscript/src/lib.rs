@@ -666,8 +666,18 @@ pub struct Ping<'a> {
 
 impl Ping<'_> {
     pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
-        let addr = self.uri.to_socket_addrs().unwrap().next().unwrap();
-        let ip = addr.ip();
+        let resolver = hickory_resolver::AsyncResolver::tokio(
+            ResolverConfig::google(),
+            ResolverOpts::default(),
+        );
+
+        let Ok(lookup) = resolver.lookup_ip(self.uri).await else {
+            return (false, vec![HealthscriptError::FailedToResolve]);
+        };
+
+        let Some(ip) = lookup.iter().next() else {
+            return (false, vec![HealthscriptError::FailedToResolve]);
+        };
 
         let timeout = std::time::Duration::from_secs(self.timeout.unwrap_or(10));
 
@@ -726,13 +736,21 @@ pub struct Dns<'a> {
 impl Dns<'_> {
     pub async fn execute(&self) -> (bool, Vec<HealthscriptError>) {
         let resolver_config = if let Some(server) = self.server {
-            let server = if server.contains(':') {
-                Cow::from(server)
-            } else {
-                Cow::from(format!("{server}:53"))
+            let server = match server.split_once(':') {
+                Some((_, port)) => {
+                    if port.is_empty() {
+                        format!("{}53", server)
+                    } else {
+                        server.to_string()
+                    }
+                }
+                None => format!("{}:53", server),
             };
 
-            let addr = server.to_socket_addrs().unwrap().next().unwrap();
+            let Ok(addr) = server.parse() else {
+                return (false, vec![HealthscriptError::FailedToResolve]);
+            };
+
             let mut config = ResolverConfig::new();
             config.add_name_server(NameServerConfig::new(
                 addr,
