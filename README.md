@@ -1,119 +1,90 @@
 # healthscript
 
-A [DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for healthcheck scripts that compiles to WASM.
+A [DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for writing healthchecks.
+
+![healthcheck example](https://healthscript.mbund.dev/https://example.com)
+![healthcheck example](https://healthscript.mbund.dev/tcp://pwn.osucyber.club:13389%20<"cheese">)
+![healthcheck example](https://healthscript.mbund.dev/ping://example.com)
+![healthcheck example](https://healthscript.mbund.dev/dns://example.com)
+
+![healthcheck example](https://healthscript.mbund.dev/https://http.codes/404%20[404])
+![healthcheck example](https://healthscript.mbund.dev/dns://thisdomaindoesntexist.com)
+
+The best way to grok the language is to look at the [examples below](#http-examples).
+
+The general philosophy behind the language design are as follows:
+
+  - Tags before the uri are included as part of the request, and tags after the uri are expectations about the response
+  - "Meta" tags like HTTP verbs, HTTP headers, status codes, and timeouts are in square brackets `[]`
+  - Body tags are in angle brackets `<>`
+  - Urls with custom schemes should be used to denote the protocol in the url, similar to `postgres://` urls for example
 
 ## HTTP Examples
 
-```
-https://example.com
-```
+- Make an HTTP `GET` request to `https://example.com`, and expect a `200` status code
 
-- Makes an HTTP GET request to `https://example.com`
-- Will return `true` when all of the following are true
-  - `200` status code
+  - `https://example.com`
+  - ![](https://healthscript.mbund.dev/https://example.com)
 
-```
-[User-Agent: my-agent](https://example.com)[X-Powered-By: my-header]
-```
+- Make an HTTP `POST` request to `https://httpbin.org/post` with a `User-Agent: curl/7.72.0` header, and expect a `200` status code and a response header of `server: gunicorn/19.9.0`
 
-- Makes an HTTP GET request to `https://example.com`
-  - With the `User-Agent` header set to `my-agent`
-- Will return `true` when all of the following are true
-  - `200` status code
-  - `X-Powered-By` header is `my-header`
+  - `[POST] [User-Agent: curl/7.72.0] https://httpbin.org/post [server: gunicorn/19.9.0]`
+  - ![](https://healthscript.mbund.dev/[POST]%20[User-Agent:%20curl/7.72.0]%20https://httpbin.org/post%20[server:%20gunicorn/19.9.0])
 
-```
-[Accept: application/json](https://example.com).[1].price == 0.5
-```
+- Make an HTTP `POST` request with some JSON, and expect a `200` status code and the response body to be JSON matching the [jq](https://stedolan.github.io/jq) expression `.json.a == 3`
 
-- Makes an HTTP GET request to `https://example.com`
-  - With the `Accept` header set to `application/json`
-- Will return `true` when all of the following are true
-  - `200` status code
-  - The response is valid JSON, and the [jq](https://stedolan.github.io/jq) expression `.[1].price == 0.5` is `true`.
+  - `[POST] <{ "a": 3 }> https://httpbin.org/post <(.json.a == 3)>`
+  - ![](https://healthscript.mbund.dev/[POST]%20<{%20"a":%203%20}>%20https://httpbin.org/post%20<(.json.a%20==%203)>)
 
-```
-[Accept: application/json][Authorization: Bearer $auth](https://example.com)/my.*ue/
-```
+- Make an HTTP `POST` request with body bytes encoded in base64 to `https://httpbin.org/post`, and expect a `200` status code
 
-- Makes an HTTP GET request to `https://example.com`
-  - With the `Accept` header set to `application/json`
-  - With the `Authorization` header set to `Bearer $auth`, where `$auth` is a named variable which can be passed to the script when run.
-- Will return `true` when all of the following are true
-  - `200` status code
-  - The response content matches the regular expression `/my.*ue/`
+  - `[POST] <aHR0cHM6Ly9naXRodWIuY29tL3Job21idXNnZy9oZWFsdGhzY3JpcHQ=> https://httpbin.org/post`
+  - ![](https://healthscript.mbund.dev/[POST]<aHR0cHM6Ly9naXRodWIuY29tL3Job21idXNnZy9oZWFsdGhzY3JpcHQ=>%20https://httpbin.org/post)
 
-```
-[POST]<{ "mykey": "myvalue" }>(https://example.com)
-```
+## TCP Examples
 
-- Makes an HTTP POST request to `https://example.com`
-  - With request body as the JSON object `{ "mykey": "myvalue" }`
-- Will return `true` when all of the following are true
-  - `200` status code
+- Connect to `pwn.osucyber.club` on port `13389` over TCP, and expect at least one byte to be returned
 
-```
-[POST]<aHR0cHM6Ly9naXRodWIuY29tL3Job21idXNnZy9oZWFsdGhzY3JpcHQ=>(https://example.com)
-```
+  - `tcp://pwn.osucyber.club:13389`
+  - ![](https://healthscript.mbund.dev/tcp://pwn.osucyber.club:13389)
 
-- Makes an HTTP POST request to `https://example.com`
-  - With request body as the decoded base64 string `aHR0cHM6Ly9naXRodWIuY29tL3Job21idXNnZy9oZWFsdGhzY3JpcHQ=`
-- Will return `true` when all of the following are true
-  - `200` status code
+- Connect to `pwn.osucyber.club` on port `13389` over TCP, and expect the response to contain the regex `/e./` to be found anywhere within the response, timing out after 3 seconds
 
-```
-(https://example.com)[404].status == "Not found"
-```
+  - `tcp://pwn.osucyber.club:13389 </e./> [3s]`
+  - ![](https://healthscript.mbund.dev/tcp://pwn.osucyber.club:13389%20</e./>%20[3s])
 
-- Makes an HTTP GET request to `https://example.com`
-- Will return `true` when all of the following are true
-  - `404` status code
-  - The response is valid JSON, and the [jq](https://stedolan.github.io/jq) expression `.status == "Not found"` is `true`.
+- Connect to `pwn.osucyber.club` on port `13389` over TCP, and expect the response to start with the string `chee`
 
-```
-https://example.com and https://example2.com
-```
-
-- Makes HTTP GET requests to `https://example.com` and `https://example2.com`
-- Will return `true` when all of the following are true
-  - `https://example.com` returns a `200` status code
-  - `https://example2.com` returns a `200` status code
-
-## TCP/UDP Examples
-
-```
-(tcp://example.com:1337)/.+/
-```
-
-- Connects to `example.com` on port `1337`
-  - Returns `true` if the response matches the regular expression `/.+/` (if at least 1 byte is returned)
-
-```
-(tcp://example.com:1337)/Welcome to/
-```
-
-- Connects to `example.com` on port `1337`
-  - Returns `true` if the response matches the regular expression `/Welcome to/` (there is a sequence of bytes `Welcome to` anywhere in the response)
-
-```
-(tcp://example.com:1337)/^Welcome to/
-```
-
-- Connects to `example.com` on port `1337`
-  - Returns `true` if the response matches the regular expression `/^Welcome to/` (the response starts with the bytes `Welcome to`)
+  - `tcp://pwn.osucyber.club:13389 <"chee">`
+  - ![](https://healthscript.mbund.dev/tcp://pwn.osucyber.club:13389%20<"chee">)
 
 ## Ping Examples
 
-```
-ping://example.com
-```
+- Ping `example.com`, and expect a response, timing out after 8 seconds
 
-- Pings `example.com` and returns `true` if the response is successful.
+  - `ping://example.com`
+  - ![](https://healthscript.mbund.dev/ping://example.com)
 
 ## DNS Examples
 
+- Make a DNS query to `example.com` and expect any response
+
+  - `dns://example.com`
+  - ![](https://healthscript.mbund.dev/dns://example.com)
+
+- Make a DNS query to `example.com` using the dns server `1.1.1.1` and expect any response
+
+  - `dns://example.com/1.1.1.1`
+  - ![](https://healthscript.mbund.dev/dns://example.com/1.1.1.1)
+
+## Badge Service
+
+Append healthscript at the end of `https://healthscript.mbund.dev/` to have the hosted server run the healthcheck against your service and generate an svg badge. Then, you can use markdown syntax to include it in your own readmes.
+
 ```
-dns://1.1.1.1/example.com
+![healthcheck for example.com](https://healthscript.mbund.dev/https://example.com)
 ```
 
-- Resolves `example.com` using the DNS server `1.1.1.1`
+![healthcheck for example.com](https://healthscript.mbund.dev/https://example.com)
+
+You may need to url encode your spaces to `%20`.
