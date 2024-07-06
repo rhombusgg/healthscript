@@ -1,6 +1,6 @@
 # Healthscript CLI
 
-![error handling example on the cli](errors.png)
+![error handling example on the cli](cli-errors.png)
 
 [Healthscript](https://crates.io/crates/healthscript) is a simple DSL for checking the health of a service using HTTP, TCP, ICMP (ping), and more.
 

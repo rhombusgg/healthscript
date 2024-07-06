@@ -45,7 +45,7 @@ The general philosophy behind the language design are as follows:
 
 The parser will recover from errors as best as possible to help you write correct healthscript. Errors are available using the CLI.
 
-![error handling example on the cli](errors.png)
+![error handling example on the cli](cli-errors.png)
 
 Install the CLI with
 

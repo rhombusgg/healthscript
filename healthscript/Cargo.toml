@@ -1,6 +1,6 @@
 [package]
 name = "healthscript"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "A simple DSL for checking the health of a service using HTTP, TCP, ICMP (ping), and more."
 authors = ["Mark Bundschuh <mark@mbund.dev>"]
