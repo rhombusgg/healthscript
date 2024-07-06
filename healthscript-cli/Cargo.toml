@@ -1,7 +1,12 @@
 [package]
 name = "healthscript-cli"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "CLI for healthscript, a simple DSL for checking the health of a service using HTTP, TCP, ICMP (ping), and more."
+authors = ["Mark Bundschuh <mark@mbund.dev>"]
+license = "MIT"
+repository = "https://github.com/rhombusgg/healthscript"
+keywords = ["http", "health", "monitoring"]
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
@@ -10,4 +15,3 @@ tokio = { version = "1.38.0", default-features = false, features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 yansi = "1.0.1"
-

@@ -1,6 +1,6 @@
-# healthscript
+# Healthscript
 
-A [DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for writing healthchecks.
+A [DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for writing healthchecks
 
 ![healthcheck example](https://healthscript.mbund.dev/https://example.com)
 ![healthcheck example](https://healthscript.mbund.dev/tcp://pwn.osucyber.club:13389%20<"cheese">)
@@ -41,6 +41,44 @@ The general philosophy behind the language design are as follows:
   - `[POST] <aHR0cHM6Ly9naXRodWIuY29tL3Job21idXNnZy9oZWFsdGhzY3JpcHQ=> https://httpbin.org/post`
   - ![](https://healthscript.mbund.dev/[POST]<aHR0cHM6Ly9naXRodWIuY29tL3Job21idXNnZy9oZWFsdGhzY3JpcHQ=>%20https://httpbin.org/post)
 
+## Error Recovery
+
+The parser will recover from errors as best as possible to help you write correct healthscript. Errors are available using the CLI.
+
+![error handling example on the cli](errors.png)
+
+Install the CLI with
+
+```
+cargo install healthscript-cli
+```
+
+## Badge Service
+
+Append healthscript at the end of `https://healthscript.mbund.dev/` to have the hosted server run the healthcheck against your service and generate an svg badge. Then, you can use markdown syntax to include it in your own readmes.
+
+```
+![healthcheck for example.com](https://healthscript.mbund.dev/https://example.com)
+```
+
+![healthcheck for example.com](https://healthscript.mbund.dev/https://example.com)
+
+You may need to url encode your spaces to `%20`.
+
+## Library
+
+Integrate healthscript into your own rust project. To do so, add the following to your `Cargo.toml`
+
+```
+healthscript = "1.0"
+```
+
+Or use the `cargo` CLI.
+
+```
+cargo add healthscript
+```
+
 ## TCP Examples
 
 - Connect to `pwn.osucyber.club` on port `13389` over TCP, and expect at least one byte to be returned
@@ -76,15 +114,3 @@ The general philosophy behind the language design are as follows:
 
   - `dns://example.com/1.1.1.1`
   - ![](https://healthscript.mbund.dev/dns://example.com/1.1.1.1)
-
-## Badge Service
-
-Append healthscript at the end of `https://healthscript.mbund.dev/` to have the hosted server run the healthcheck against your service and generate an svg badge. Then, you can use markdown syntax to include it in your own readmes.
-
-```
-![healthcheck for example.com](https://healthscript.mbund.dev/https://example.com)
-```
-
-![healthcheck for example.com](https://healthscript.mbund.dev/https://example.com)
-
-You may need to url encode your spaces to `%20`.

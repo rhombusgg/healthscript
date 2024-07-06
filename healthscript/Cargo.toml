@@ -1,7 +1,12 @@
 [package]
 name = "healthscript"
-version = "0.1.0"
+version = "1.0.2"
 edition = "2021"
+description = "A simple DSL for checking the health of a service using HTTP, TCP, ICMP (ping), and more."
+authors = ["Mark Bundschuh <mark@mbund.dev>"]
+license = "MIT"
+repository = "https://github.com/rhombusgg/healthscript"
+keywords = ["http", "health", "monitoring"]
 
 [dependencies]
 ariadne = "0.4.1"
@@ -30,4 +35,3 @@ yansi = "1.0.1"
 
 [dev-dependencies]
 expect-test = "1.5.0"
-
