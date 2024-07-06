@@ -234,7 +234,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "badge-maker",
- "healthscript",
+ "healthscript 1.0.3",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -539,11 +539,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "healthscript"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52606c189673201762024bc1251f0e4470fcef168c9796907a36d0170a4c09e6"
+dependencies = [
+ "ariadne",
+ "async-recursion",
+ "base64 0.22.1",
+ "chumsky 1.0.0-alpha.7",
+ "hickory-resolver",
+ "jaq-core",
+ "jaq-interpret",
+ "jaq-parse",
+ "jaq-std",
+ "jaq-syn",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "strsim",
+ "surge-ping",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "yansi",
+]
+
+[[package]]
 name = "healthscript-cli"
 version = "1.0.0"
 dependencies = [
  "clap",
- "healthscript",
+ "healthscript 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "tracing",
  "tracing-subscriber",
