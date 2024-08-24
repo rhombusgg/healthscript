@@ -1,6 +1,8 @@
 # Healthscript
 
-A [DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for writing healthchecks
+A [DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for writing healthchecks.
+
+Read the [blog post](https://mbund.dev/posts/healthscript) for uses cases and why this was created.
 
 ![healthcheck example](https://healthscript.mbund.dev/https://example.com)
 ![healthcheck example](https://healthscript.mbund.dev/tcp://pwn.osucyber.club:13389%20<"cheese">)
