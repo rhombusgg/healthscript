@@ -13,10 +13,14 @@ use async_recursion::async_recursion;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use jaq_interpret::FilterT;
 use regex::Regex;
+use rustls::ClientConfig;
+use rustls::ServerName;
 use serde_json::Value;
 use strsim::normalized_levenshtein;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
+use tokio_rustls::TlsConnector;
+use webpki_roots;
 use yansi::Paint;
 
 pub type Span = SimpleSpan<usize>;
@@ -44,6 +48,8 @@ pub enum HealthscriptError {
 pub enum HealthscriptTcpError {
     #[error("Failed to connect to TCP stream")]
     ConnectionFailed,
+    #[error("TLS handshake failed")]
+    TlsHandshakeFailed,
 }
 
 #[derive(Error, Debug)]
@@ -109,7 +115,13 @@ impl<'a> Expr<'a> {
     pub fn representative_uri(&'a self) -> String {
         match self {
             Expr::Http(http) => http.url.to_string(),
-            Expr::Tcp(tcp) => format!("tcp://{}", tcp.uri),
+            Expr::Tcp(tcp) => {
+                if tcp.use_tls {
+                    format!("tcps://{}", tcp.uri)
+                } else {
+                    format!("tcp://{}", tcp.uri)
+                }
+            }
             Expr::Ping(ping) => format!("ping://{}", ping.uri),
             Expr::Dns(dns) => format!("dns://{}", dns.uri),
             Expr::And(lhs, _) => lhs.representative_uri(),
@@ -576,19 +588,24 @@ pub struct Tcp<'a> {
     uri: &'a str,
     timeout: Option<u64>,
     response_body: Option<Body<'a>>,
+    use_tls: bool,
 }
 
 impl Tcp<'_> {
     pub async fn execute_inner(&self) -> (bool, Vec<HealthscriptError>) {
-        let uri = match self.uri.split_once(':') {
-            Some((_, port)) => {
+        let (hostname, uri) = match self.uri.split_once(':') {
+            Some((host, port)) => {
                 if port.is_empty() {
-                    format!("{}80", self.uri)
+                    let default_port = if self.use_tls { 443 } else { 80 };
+                    (host, format!("{}:{}", host, default_port))
                 } else {
-                    self.uri.to_string()
+                    (host, self.uri.to_string())
                 }
             }
-            None => format!("{}:80", self.uri),
+            None => {
+                let default_port = if self.use_tls { 443 } else { 80 };
+                (self.uri, format!("{}:{}", self.uri, default_port))
+            }
         };
 
         let Ok(mut addr) = uri.to_socket_addrs() else {
@@ -601,8 +618,38 @@ impl Tcp<'_> {
 
         let response_body = self.response_body.clone();
 
-        let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await else {
+        let Ok(stream) = tokio::net::TcpStream::connect(&addr).await else {
             return (false, vec![HealthscriptTcpError::ConnectionFailed.into()]);
+        };
+
+        let mut stream: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if self.use_tls {
+            let mut root_store = rustls::RootCertStore::empty();
+            root_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
+                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+                    ta.subject,
+                    ta.spki,
+                    ta.name_constraints,
+                )
+            }));
+
+            let config = ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+
+            let connector = TlsConnector::from(std::sync::Arc::new(config));
+
+            let server_name = match ServerName::try_from(hostname) {
+                Ok(name) => name,
+                Err(_) => return (false, vec![HealthscriptTcpError::TlsHandshakeFailed.into()]),
+            };
+
+            match connector.connect(server_name, stream).await {
+                Ok(tls_stream) => Box::new(tls_stream),
+                Err(_) => return (false, vec![HealthscriptTcpError::TlsHandshakeFailed.into()]),
+            }
+        } else {
+            Box::new(stream)
         };
 
         let mut accumulated_data = Vec::new();
@@ -669,7 +716,11 @@ impl Tcp<'_> {
 
 impl Display for Tcp<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "tcp://{}", self.uri)?;
+        if self.use_tls {
+            write!(f, "tcps://{}", self.uri)?;
+        } else {
+            write!(f, "tcp://{}", self.uri)?;
+        }
 
         if let Some(timeout) = self.timeout {
             write!(f, " [{}s]", timeout)?;
@@ -1712,8 +1763,8 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
 
     let tcp_response_body = choice((body_text, body_regex, body_base64)).boxed();
 
-    let tcp_url = just("tcp://")
-        .ignore_then(none_of(" ").repeated().to_slice())
+    let tcp_url = choice((just("tcps://").map(|_| true), just("tcp://").map(|_| false)))
+        .then(none_of(" ").repeated().to_slice())
         .padded()
         .boxed();
 
@@ -1726,7 +1777,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
             .repeated()
             .collect::<Vec<_>>(),
         )
-        .validate(|(uri, responses), e, emitter| {
+        .validate(|((use_tls, uri), responses), e, emitter| {
             let timeout = {
                 let timeouts = responses
                     .iter()
@@ -1804,12 +1855,13 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Expr<'a>, extra::Full<MyError<'a>, (
                 bodies.first().map(|(b, _)| b.clone())
             };
 
-            (uri, timeout, response_body)
+            (uri, timeout, response_body, use_tls)
         })
-        .map(|(uri, timeout, response_body)| Tcp {
+        .map(|(uri, timeout, response_body, use_tls)| Tcp {
             uri,
             timeout,
             response_body,
+            use_tls,
         })
         .boxed();
 
