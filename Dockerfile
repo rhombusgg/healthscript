@@ -14,7 +14,7 @@ COPY . .
 RUN cargo build --release --bin badge-service
 
 # We do not need the Rust toolchain to run the binary!
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 WORKDIR /app
 COPY --from=builder /app/target/release/badge-service /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/badge-service"]
