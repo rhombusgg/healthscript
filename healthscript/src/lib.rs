@@ -282,16 +282,15 @@ impl Http<'_> {
             "Received response",
         );
 
-        if let Some(status_code) = self.status_code {
-            if response.status().as_u16() != status_code {
-                errors.push(
-                    HealthscriptHttpError::UnexpectedStatusCode {
-                        expected: status_code,
-                        found: response.status().as_u16(),
-                    }
-                    .into(),
-                );
-            }
+        let expected_status = self.status_code.unwrap_or(200);
+        if response.status().as_u16() != expected_status {
+            errors.push(
+                HealthscriptHttpError::UnexpectedStatusCode {
+                    expected: expected_status,
+                    found: response.status().as_u16(),
+                }
+                .into(),
+            );
         }
 
         let response_headers = response.headers();
