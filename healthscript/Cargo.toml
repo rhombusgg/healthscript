@@ -33,7 +33,7 @@ thiserror = "1.0"
 tokio = { version = "1.38.0", default-features = false, features = ["full"] }
 tokio-rustls = "0.24"
 tracing = "0.1.40"
-webpki-roots = "0.25"
+webpki-roots = "1.0.10"
 yansi = "1.0.1"
 
 [dev-dependencies]
